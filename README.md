@@ -1,1 +1,0 @@
-# comp_graphics_alg
