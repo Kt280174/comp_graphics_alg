@@ -316,7 +316,7 @@ void Cleanup() {
 #ifdef _DEBUG
         ID3D11Debug* pDebug = nullptr;
         if (SUCCEEDED(g_pDevice->QueryInterface(IID_PPV_ARGS(&pDebug)))) {
-            pDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL);
+            pDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL | D3D11_RLDO_IGNORE_INTERNAL);
             pDebug->Release();
         }
 #endif
