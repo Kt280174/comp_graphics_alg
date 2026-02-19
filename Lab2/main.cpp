@@ -1,4 +1,4 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <d3dcompiler.h>
@@ -17,12 +17,12 @@ constexpr float CLEAR_COLOR[] = { 0.12f, 0.12f, 0.16f, 1.0f };
 // Vertex structure
 struct Vertex {
     float x, y, z;
-    uint32_t color;
+    uint32_t color; 
 };
 
 // Vertex data
 static const Vertex g_vertices[] = {
-    { -0.5f, -0.5f, 0.0f, 0xFF00FF00 },
+    { -0.5f, -0.5f, 0.0f, 0xFF00FF00 }, 
     {  0.5f, -0.5f, 0.0f, 0xFF0000FF},
     {  0.0f,  0.5f, 0.0f, 0xFFFF0000}
 };
@@ -86,13 +86,13 @@ HRESULT CompileShader(const char* source, const char* entryPoint, const char* ta
     HRESULT hr = D3DCompile(
         source,
         strlen(source),
-        nullptr,
-        nullptr,
-        nullptr,
+        nullptr,           
+        nullptr,           
+        nullptr,           
         entryPoint,
         target,
         flags,
-        0,
+        0,                 
         outBlob,
         &pErrorBlob
     );
@@ -110,7 +110,7 @@ HRESULT CompileShader(const char* source, const char* entryPoint, const char* ta
 HRESULT InitD3D11(HWND hwnd) {
     HRESULT hr;
 
-
+ 
     DXGI_SWAP_CHAIN_DESC scDesc = {};
     scDesc.BufferCount = 1;
     scDesc.BufferDesc.Width = WINDOW_WIDTH;
@@ -136,24 +136,24 @@ HRESULT InitD3D11(HWND hwnd) {
     };
     D3D_FEATURE_LEVEL featureLevel;
 
-
+    
     hr = D3D11CreateDeviceAndSwapChain(
-        nullptr,
-        D3D_DRIVER_TYPE_HARDWARE,
-        nullptr,
-        createDeviceFlags,
-        featureLevels,
-        ARRAYSIZE(featureLevels),
-        D3D11_SDK_VERSION,
-        &scDesc,
-        &g_pSwapChain,
-        &g_pDevice,
-        &featureLevel,
-        &g_pContext
+        nullptr,                          
+        D3D_DRIVER_TYPE_HARDWARE,         
+        nullptr,                          
+        createDeviceFlags,                 
+        featureLevels,                     
+        ARRAYSIZE(featureLevels),          
+        D3D11_SDK_VERSION,                 
+        &scDesc,                           
+        &g_pSwapChain,                     
+        &g_pDevice,                        
+        &featureLevel,                      
+        &g_pContext                         
     );
 
     if (FAILED(hr)) {
-
+    
         hr = D3D11CreateDeviceAndSwapChain(
             nullptr,
             D3D_DRIVER_TYPE_WARP,
@@ -279,7 +279,7 @@ void RenderFrame() {
 }
 
 void Cleanup() {
-
+    
     if (g_pInputLayout) {
         g_pInputLayout->Release();
         g_pInputLayout = nullptr;
