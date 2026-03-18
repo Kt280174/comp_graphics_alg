@@ -22,9 +22,6 @@ using namespace DirectX;
 #define SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof(a[0]))
 
-//=====================================================================
-// CONSTANTS & GLOBAL VARIABLES
-//=====================================================================
 const UINT WINDOW_WIDTH = 1280;
 const UINT WINDOW_HEIGHT = 720;
 
@@ -45,13 +42,12 @@ ID3D11PixelShader* g_pPixelShader = nullptr;
 ID3D11InputLayout* g_pInputLayout = nullptr;
 ID3D11Buffer* g_pModelCB = nullptr;
 
-
 ID3D11Buffer* g_pTransparentVertexBuffer = nullptr;
 ID3D11Buffer* g_pTransparentIndexBuffer = nullptr;
 UINT g_transparentIndexCount = 36;
 std::vector<XMMATRIX> g_transparentWorldMatrices;
 std::vector<float> g_transparentAlphas;
-std::vector<XMFLOAT4> g_transparentColors; 
+std::vector<XMFLOAT4> g_transparentColors;
 ID3D11VertexShader* g_pTransparentVS = nullptr;
 ID3D11PixelShader* g_pTransparentPS = nullptr;
 ID3D11InputLayout* g_pTransparentInputLayout = nullptr;
@@ -59,7 +55,7 @@ ID3D11Buffer* g_pTransparentCB = nullptr;
 ID3D11BlendState* g_pBlendState = nullptr;
 ID3D11DepthStencilState* g_pTransparentDepthState = nullptr;
 
-// Skybox
+
 ID3D11Buffer* g_pSkyboxVertexBuffer = nullptr;
 ID3D11Buffer* g_pSkyboxIndexBuffer = nullptr;
 ID3D11VertexShader* g_pSkyboxVS = nullptr;
@@ -82,7 +78,7 @@ double g_lastFrameTime = 0;
 // Input states
 bool g_keyLeft = false, g_keyRight = false, g_keyUp = false, g_keyDown = false;
 
-// Rotation angles
+
 float g_centerRotation = 0.0f;
 float g_orbitAngle1 = 0.0f;
 float g_orbitAngle2 = 0.0f;
@@ -98,7 +94,7 @@ struct TransparentVertex
 {
     XMFLOAT3 pos;
     XMFLOAT2 uv;
-    
+
 };
 
 struct ModelConstantBuffer
@@ -110,13 +106,19 @@ struct ViewProjConstantBuffer
 {
     XMMATRIX vp;
 };
-
+struct TransparentRenderItem
+{
+    XMMATRIX worldMatrix;
+    float alpha;
+    XMFLOAT4 color;
+    float distance;
+};
 struct TransparentConstantBuffer
 {
     XMMATRIX model;
     float alpha;
-    float padding[3];       
-    XMFLOAT4 tintColor;     
+    float padding[3];
+    XMFLOAT4 tintColor;
 };
 //=====================================================================
 // DDS LOADER STRUCTURES
@@ -175,6 +177,9 @@ struct TextureDesc
     void* pData = nullptr;
 };
 
+//=====================================================================
+// FORWARD DECLARATIONS
+//=====================================================================
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 bool Initialize(HWND hWnd, UINT width, UINT height);
 void Cleanup();
@@ -182,7 +187,6 @@ void Render();
 void Resize(UINT newWidth, UINT newHeight);
 void HandleKey(UINT key, bool isDown);
 
-std::wstring GetPath();
 bool CreateDeviceAndSwapChain();
 bool CreateRenderTargetAndDepthStencil();
 bool CreateBuffers();
@@ -200,6 +204,7 @@ bool LoadDDS(const wchar_t* filename, TextureDesc& desc);
 ID3D11ShaderResourceView* CreateTexture2D(ID3D11Device* device, const TextureDesc& desc);
 ID3D11ShaderResourceView* CreateCubemap(ID3D11Device* device, const std::wstring* facePaths);
 
+std::wstring GetPath();
 
 std::wstring GetPath()
 {
@@ -468,9 +473,6 @@ ID3D11ShaderResourceView* CreateCubemap(ID3D11Device* device, const std::wstring
     return pSRV;
 }
 
-//=====================================================================
-// CAMERA FUNCTIONS
-//=====================================================================
 void UpdateCamera(float deltaTime)
 {
     if (g_keyLeft) g_yaw -= g_moveSpeed * deltaTime;
@@ -513,9 +515,6 @@ XMVECTOR GetEyePosition()
     );
 }
 
-//=====================================================================
-// RENDERER FUNCTIONS
-//=====================================================================
 bool CreateDeviceAndSwapChain()
 {
     UINT flags = 0;
@@ -692,7 +691,6 @@ bool CompileShaders()
     ID3DBlob* pPsBlob = nullptr;
     ID3DBlob* pErrorBlob = nullptr;
 
-    // 1. Cube shaders
     const char* cubeVS = R"(
         cbuffer ModelCB : register(b0) { float4x4 model; }
         cbuffer ViewProjCB : register(b1) { float4x4 vp; }
@@ -808,7 +806,6 @@ bool CompileShaders()
     SAFE_RELEASE(pPsBlob);
     SAFE_RELEASE(pErrorBlob);
 
-    
     const char* skyboxVS = R"(
         cbuffer ViewProjCB : register(b1) {
             float4x4 vp;
@@ -946,10 +943,106 @@ bool LoadTextures()
 
     return true;
 }
+void SortTransparentObjects(std::vector<TransparentRenderItem>& items, const XMVECTOR& cameraPos)
+{
+    for (auto& item : items)
+    {
+        XMVECTOR objPos = XMVectorSet(0, 0, 0, 1);
+        objPos = XMVector3Transform(objPos, item.worldMatrix);
+        XMVECTOR distVec = XMVectorSubtract(objPos, cameraPos);
+        item.distance = XMVectorGetX(XMVector3Length(distVec));
+    }
 
+    std::sort(items.begin(), items.end(),
+        [](const TransparentRenderItem& a, const TransparentRenderItem& b) {
+            return a.distance > b.distance;
+        });
+}
+void RenderTransparentObjects(const XMMATRIX& view, const XMMATRIX& proj, float time)
+{
+    if (!g_pTransparentVertexBuffer) return;
+
+    g_orbitAngle1 += time * 0.5f;
+    g_orbitAngle2 += time * 0.3f;
+
+    std::vector<TransparentRenderItem> items;
+
+    float x1 = g_orbitRadius * cos(g_orbitAngle1);
+    float z1 = g_orbitRadius * sin(g_orbitAngle1);
+    XMMATRIX model1 = XMMatrixTranslation(x1, 0.0f, z1) * XMMatrixRotationY(g_orbitAngle1 * 0.5f);
+
+    TransparentRenderItem item1;
+    item1.worldMatrix = model1;
+    item1.alpha = g_transparentAlphas[0];
+    item1.color = g_transparentColors[0];
+    items.push_back(item1);
+
+    float x2 = g_orbitRadius * cos(g_orbitAngle2 + XM_PI);
+    float z2 = g_orbitRadius * sin(g_orbitAngle2 + XM_PI);
+    XMMATRIX model2 = XMMatrixTranslation(x2, 0.5f, z2) * XMMatrixRotationY(g_orbitAngle2 * 0.7f);
+
+    TransparentRenderItem item2;
+    item2.worldMatrix = model2;
+    item2.alpha = g_transparentAlphas[1];
+    item2.color = g_transparentColors[1];
+    items.push_back(item2);
+
+    XMVECTOR cameraPos = GetEyePosition();
+    SortTransparentObjects(items, cameraPos);
+
+    // Set các state
+    g_pContext->OMSetBlendState(g_pBlendState, nullptr, 0xffffffff);
+    g_pContext->OMSetDepthStencilState(g_pTransparentDepthState, 0);
+
+    D3D11_RASTERIZER_DESC rsDesc = {};
+    rsDesc.FillMode = D3D11_FILL_SOLID;
+    rsDesc.CullMode = D3D11_CULL_BACK;
+    ID3D11RasterizerState* pRS = nullptr;
+    g_pDevice->CreateRasterizerState(&rsDesc, &pRS);
+    g_pContext->RSSetState(pRS);
+
+    g_pContext->VSSetShader(g_pTransparentVS, nullptr, 0);
+    g_pContext->PSSetShader(g_pTransparentPS, nullptr, 0);
+    g_pContext->IASetInputLayout(g_pTransparentInputLayout);
+
+    UINT stride = sizeof(TransparentVertex);
+    UINT offset = 0;
+    g_pContext->IASetVertexBuffers(0, 1, &g_pTransparentVertexBuffer, &stride, &offset);
+    g_pContext->IASetIndexBuffer(g_pTransparentIndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+
+    g_pContext->PSSetShaderResources(0, 1, &g_pTextureView);
+    g_pContext->PSSetSamplers(0, 1, &g_pSampler);
+
+    XMMATRIX vp = view * proj;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (SUCCEEDED(g_pContext->Map(g_pViewProjCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        ViewProjConstantBuffer* pData = (ViewProjConstantBuffer*)mapped.pData;
+        XMStoreFloat4x4((XMFLOAT4X4*)&pData->vp, XMMatrixTranspose(vp));
+        g_pContext->Unmap(g_pViewProjCB, 0);
+    }
+
+
+    for (const auto& item : items)
+    {
+        TransparentConstantBuffer cbData;
+        XMStoreFloat4x4((XMFLOAT4X4*)&cbData.model, XMMatrixTranspose(item.worldMatrix));
+        cbData.alpha = item.alpha;
+        cbData.tintColor = item.color;
+        cbData.padding[0] = cbData.padding[1] = cbData.padding[2] = 0.0f;
+
+        g_pContext->UpdateSubresource(g_pTransparentCB, 0, nullptr, &cbData, 0, 0);
+
+        ID3D11Buffer* cbs[] = { g_pTransparentCB, g_pViewProjCB };
+        g_pContext->VSSetConstantBuffers(0, 2, cbs);
+
+        g_pContext->DrawIndexed(g_transparentIndexCount, 0, 0);
+    }
+
+    SAFE_RELEASE(pRS);
+}
 void SetupTransparentObjects()
 {
-    
+
     TransparentVertex transparentVertices[] = {
         { XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT2(0.0f, 1.0f) },
         { XMFLOAT3(0.5f, -0.5f, -0.5f), XMFLOAT2(1.0f, 1.0f) },
@@ -982,7 +1075,6 @@ void SetupTransparentObjects()
         12,14,13, 12,15,14, 16,18,17, 16,19,18, 20,22,21, 20,23,22
     };
 
-   
     D3D11_BUFFER_DESC desc = {};
     D3D11_SUBRESOURCE_DATA data = {};
     desc.ByteWidth = sizeof(transparentVertices);
@@ -997,77 +1089,16 @@ void SetupTransparentObjects()
     data.pSysMem = transparentIndices;
     g_pDevice->CreateBuffer(&desc, &data, &g_pTransparentIndexBuffer);
 
+
     g_transparentAlphas.resize(2);
-    g_transparentColors.resize(2); 
+    g_transparentColors.resize(2);
 
     g_transparentAlphas[0] = 0.55f;
-    g_transparentColors[0] = XMFLOAT4(1.0f, 0.2f, 0.2f, 1.0f);  
+    g_transparentColors[0] = XMFLOAT4(1.0f, 0.2f, 0.2f, 1.0f);
 
-    
+
     g_transparentAlphas[1] = 0.6f;
     g_transparentColors[1] = XMFLOAT4(0.0f, 0.5f, 1.0f, 1.0f);
-}
-void RenderTransparentObjects(const XMMATRIX& view, const XMMATRIX& proj, float time)
-{
-    if (!g_pTransparentVertexBuffer) return;
-
-    g_orbitAngle1 += time * 0.5f;
-    g_orbitAngle2 += time * 0.3f;
-
-    g_pContext->OMSetBlendState(g_pBlendState, nullptr, 0xffffffff);
-    g_pContext->OMSetDepthStencilState(g_pTransparentDepthState, 0);
-
-    D3D11_RASTERIZER_DESC rsDesc = {};
-    rsDesc.FillMode = D3D11_FILL_SOLID;
-    rsDesc.CullMode = D3D11_CULL_BACK;
-    ID3D11RasterizerState* pRS = nullptr;
-    g_pDevice->CreateRasterizerState(&rsDesc, &pRS);
-    g_pContext->RSSetState(pRS);
-
-    g_pContext->VSSetShader(g_pTransparentVS, nullptr, 0);
-    g_pContext->PSSetShader(g_pTransparentPS, nullptr, 0);
-    g_pContext->IASetInputLayout(g_pTransparentInputLayout);
-
-    UINT stride = sizeof(TransparentVertex);
-    UINT offset = 0;
-    g_pContext->IASetVertexBuffers(0, 1, &g_pTransparentVertexBuffer, &stride, &offset);
-    g_pContext->IASetIndexBuffer(g_pTransparentIndexBuffer, DXGI_FORMAT_R16_UINT, 0);
-
-    g_pContext->PSSetShaderResources(0, 1, &g_pTextureView);
-    g_pContext->PSSetSamplers(0, 1, &g_pSampler);
-
-    XMMATRIX vp = view * proj;
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(g_pContext->Map(g_pViewProjCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-        ViewProjConstantBuffer* pData = (ViewProjConstantBuffer*)mapped.pData;
-        XMStoreFloat4x4((XMFLOAT4X4*)&pData->vp, XMMatrixTranspose(vp));
-        g_pContext->Unmap(g_pViewProjCB, 0);
-    }
-
-    for (int i = 0; i < 2; ++i) {
-        float angle = (i == 0) ? g_orbitAngle1 : g_orbitAngle2 + XM_PI;
-        float yOffset = (i == 0) ? 0.0f : 0.5f;
-
-        float x = g_orbitRadius * cos(angle);
-        float z = g_orbitRadius * sin(angle);
-        XMMATRIX model = XMMatrixTranslation(x, yOffset, z) *
-            XMMatrixRotationY(angle * 0.5f + (i * 0.2f));
-
-        TransparentConstantBuffer cbData;
-        XMStoreFloat4x4((XMFLOAT4X4*)&cbData.model, XMMatrixTranspose(model));
-        cbData.alpha = g_transparentAlphas[i];
-        cbData.tintColor = g_transparentColors[i];  
-        cbData.padding[0] = cbData.padding[1] = cbData.padding[2] = 0.0f;
-
-        g_pContext->UpdateSubresource(g_pTransparentCB, 0, nullptr, &cbData, 0, 0);
-
-        ID3D11Buffer* cbs[] = { g_pTransparentCB, g_pViewProjCB };
-        g_pContext->VSSetConstantBuffers(0, 2, cbs);
-
-        g_pContext->DrawIndexed(g_transparentIndexCount, 0, 0);
-    }
-
-    SAFE_RELEASE(pRS);
 }
 
 void RenderSkybox(const XMMATRIX& vpSky)
@@ -1373,9 +1404,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     return DefWindowProcW(hWnd, message, wParam, lParam);
 }
 
-//=====================================================================
-// ENTRY POINT
-//=====================================================================
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE,
     _In_ LPWSTR, _In_ int nCmdShow)
 {
