@@ -273,7 +273,7 @@ UINT g_ScreenWidth = 1280;
 UINT g_ScreenHeight = 720;
 float g_CameraYaw = 0.0f;
 float g_CameraPitch = 0.0f;
-float g_CameraDistance = 5.0f;
+float g_CameraDistance = 15.0f;
 bool g_KeyLeft = false, g_KeyRight = false, g_KeyUp = false, g_KeyDown = false;
 double g_PreviousFrameTime = 0.0;
 
@@ -710,7 +710,7 @@ void CompileShaders()
                 float4x4 normalMatrix;
                 float4 materialProps;
                 float4 rotationAngle;
-            } instances[100];
+            } instances[10];
         };
         cbuffer ViewProjCB : register(b2)
         {
@@ -760,7 +760,7 @@ void CompileShaders()
                 float4x4 normalMatrix;
                 float4 materialProps;
                 float4 rotationAngle;
-            } instances[100];
+            } instances[10];
         };
         cbuffer SceneCB : register(b3)
         {
@@ -776,7 +776,7 @@ void CompileShaders()
         };
         cbuffer VisibleIndices : register(b4)
         {
-            uint4 visibleIds[100];
+            uint4 visibleIds[10];
         };
         struct VSOutput
         {
@@ -1020,7 +1020,7 @@ void LoadTextureResources()
         if (faceInfos[i].data) free(faceInfos[i].data);
 
     TextureInfo texInfo;
-    std::wstring normalPath = GetAppPath() + L"..\\..\\texture\\Brick_NM.dds";
+    std::wstring normalPath = GetAppPath() + L"..\\..\\texture\\BrickNM.dds";
     if (LoadDDSFile(normalPath.c_str(), texInfo))
     {
         D3D11_TEXTURE2D_DESC normTexDesc = {};
@@ -1164,8 +1164,10 @@ void CreateInstances()
 {
     g_ActiveInstanceCount = MAX_OBJECTS;
 
+    // Định nghĩa kích thước khác nhau cho từng object
     float sizes[] = { 0.5f, 0.6f, 0.4f, 0.7f, 0.5f, 0.8f, 0.4f, 0.6f, 0.5f, 0.7f };
 
+    // Vị trí khác nhau thay vì xếp trên mặt cầu
     XMFLOAT3 positions[] = {
         XMFLOAT3(-2.0f, 0.0f, -2.0f),
         XMFLOAT3(2.0f, 0.0f, -2.0f),
@@ -1181,17 +1183,21 @@ void CreateInstances()
 
     for (UINT i = 0; i < MAX_OBJECTS; ++i)
     {
+        // Tạo ma trận scale với kích thước khác nhau
         float size = sizes[i % 10];
         XMMATRIX scale = XMMatrixScaling(size, size, size);
 
+        // Tạo ma trận translation với vị trí khác nhau
         XMMATRIX translation = XMMatrixTranslation(positions[i].x, positions[i].y, positions[i].z);
 
+        // Kết hợp scale và translation
         XMMATRIX world = scale * translation;
         XMMATRIX normal = XMMatrixTranspose(XMMatrixInverse(nullptr, world));
 
         g_InstancesData[i].worldMatrix = world;
         g_InstancesData[i].normalMatrix = normal;
 
+        // Random texture ID
         int texId = rand() % NUM_MATERIALS;
         float shininess = 16.0f + (rand() % 48);
         float rotSpeed = 0.2f + (rand() % 100) / 100.0f;
@@ -1320,7 +1326,7 @@ void RenderScene()
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
     XMMATRIX view = XMMatrixLookAtLH(eye, at, up);
     float aspect = (float)g_ScreenWidth / (float)g_ScreenHeight;
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PI / 3.0f, aspect, 0.1f, 100.0f);
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PI / 6.0f, aspect, 0.1f, 25.0f);
     XMMATRIX viewProj = view * proj;
 
 
@@ -1571,7 +1577,10 @@ void ResizeWindow(UINT newWidth, UINT newHeight)
 void CleanupD3D()
 {
     if (g_pContext)
+    {
         g_pContext->ClearState();
+        g_pContext->Flush();
+    }
 
     SAFE_RELEASE(g_pModelCB);
     SAFE_RELEASE(g_pViewProjCB);
@@ -1611,17 +1620,23 @@ void CleanupD3D()
     SAFE_RELEASE(g_pFilterPS);
 
 #ifdef _DEBUG
-    if (g_pDevice)
+    ID3D11Debug* pDebug = nullptr;
+    if (g_pDevice && SUCCEEDED(g_pDevice->QueryInterface(__uuidof(ID3D11Debug), (void**)&pDebug)))
     {
-        ID3D11Debug* pDebug = nullptr;
-        if (SUCCEEDED(g_pDevice->QueryInterface(__uuidof(ID3D11Debug), (void**)&pDebug)))
-        {
-            pDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL | D3D11_RLDO_IGNORE_INTERNAL);
-            pDebug->Release();
-        }
+        // Сначала освободить context
+        SAFE_RELEASE(g_pContext);
+
+        // Теперь можно смотреть live objects
+        pDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL | D3D11_RLDO_IGNORE_INTERNAL);
+        pDebug->Release();
     }
+    else
+    {
+        SAFE_RELEASE(g_pContext);
+    }
+#else
+    SAFE_RELEASE(g_pContext);
 #endif
 
-    SAFE_RELEASE(g_pContext);
     SAFE_RELEASE(g_pDevice);
 }
