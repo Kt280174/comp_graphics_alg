@@ -9,6 +9,8 @@
 #include <vector>
 #include <cstdio> 
 #include <algorithm> 
+#include <ctime>
+#include <cstdlib>
 
 #ifndef MAKEFOURCC
 #define MAKEFOURCC(ch0, ch1, ch2, ch3) \
@@ -25,67 +27,168 @@
 
 using namespace DirectX;
 
-const UINT MAX_INSTANCES = 10;
-const UINT NUM_TEXTURES = 2;
-const std::wstring TEXTURE_NAMES[] = {
+// Constants
+const UINT MAX_OBJECTS = 10;
+const UINT MATERIAL_COUNT = 2;
+const std::wstring MATERIAL_PATHS[] = {
     L"Brick.dds",
     L"Kitty.dds"
 };
 
-std::wstring GetExePath()
+// Forward declarations
+struct MeshData;
+struct ImageData;
+struct VertexLayout;
+struct InstanceData;
+
+// Global variables
+HWND g_MainWindow = nullptr;
+ID3D11Device* g_Device = nullptr;
+ID3D11DeviceContext* g_Context = nullptr;
+IDXGISwapChain* g_SwapChain = nullptr;
+ID3D11RenderTargetView* g_MainRTV = nullptr;
+ID3D11DepthStencilView* g_DSV = nullptr;
+ID3D11RasterizerState* g_NoCullRS = nullptr;
+ID3D11ShaderResourceView* g_NormalSRV = nullptr;
+
+// Buffers
+ID3D11Buffer* g_VertexBuffer = nullptr;
+ID3D11Buffer* g_IndexBuffer = nullptr;
+ID3D11Buffer* g_SkyboxVB = nullptr;
+ID3D11Buffer* g_SkyboxIB = nullptr;
+
+// Shaders - Main
+ID3D11VertexShader* g_MainVS = nullptr;
+ID3D11PixelShader* g_MainPS = nullptr;
+ID3D11InputLayout* g_MainLayout = nullptr;
+
+// Shaders - Skybox
+ID3D11VertexShader* g_SkyboxVS = nullptr;
+ID3D11PixelShader* g_SkyboxPS = nullptr;
+ID3D11InputLayout* g_SkyboxLayout = nullptr;
+
+// Shaders - Instanced
+ID3D11VertexShader* g_InstancedVS = nullptr;
+ID3D11PixelShader* g_InstancedPS = nullptr;
+ID3D11InputLayout* g_InstancedLayout = nullptr;
+
+// Shaders - Post process
+ID3D11VertexShader* g_PostVS = nullptr;
+ID3D11PixelShader* g_PostPS = nullptr;
+
+// Constant buffers
+struct TransformData { XMMATRIX world; };
+struct ViewProjectionData { XMMATRIX vp; };
+struct FrameData {
+    XMMATRIX vp;
+    XMFLOAT4 camPosition;
+    XMFLOAT4 lightCount;
+    struct LightSource {
+        XMFLOAT4 position;
+        XMFLOAT4 color;
+    } lights[10];
+    XMFLOAT4 ambient;
+};
+
+struct PerInstance {
+    XMMATRIX world;
+    XMMATRIX worldInvTrans;
+    XMFLOAT4 materialProps;
+    XMFLOAT4 rotation;
+};
+
+ID3D11Buffer* g_FrameCB = nullptr;
+ID3D11Buffer* g_TransformCB = nullptr;
+ID3D11Buffer* g_ViewProjCB = nullptr;
+ID3D11Buffer* g_InstanceCB = nullptr;
+ID3D11Buffer* g_VisibleListCB = nullptr;
+
+// Textures
+ID3D11ShaderResourceView* g_MainTexture = nullptr;
+ID3D11ShaderResourceView* g_Cubemap = nullptr;
+ID3D11ShaderResourceView* g_TextureArray = nullptr;
+ID3D11SamplerState* g_Sampler = nullptr;
+
+// Render targets
+ID3D11Texture2D* g_OffscreenBuffer = nullptr;
+ID3D11RenderTargetView* g_OffscreenRTV = nullptr;
+ID3D11ShaderResourceView* g_OffscreenSRV = nullptr;
+
+// State objects
+ID3D11BlendState* g_BlendState = nullptr;
+ID3D11DepthStencilState* g_DepthReadOnly = nullptr;
+ID3D11RasterizerState* g_BackfaceCullRS = nullptr;
+
+// Instance data
+PerInstance g_Instances[MAX_OBJECTS];
+UINT g_InstanceCount = 0;
+XMVECTOR g_LocalMin = XMVectorSet(-0.5f, -0.5f, -0.5f, 0.0f);
+XMVECTOR g_LocalMax = XMVectorSet(0.5f, 0.5f, 0.5f, 0.0f);
+
+// Camera and window
+UINT g_ScreenWidth = 1280;
+UINT g_ScreenHeight = 720;
+float g_CameraYaw = 0.0f;
+float g_CameraPitch = 0.0f;
+float g_CameraDist = 3.0f;
+bool g_InputLeft = false, g_InputRight = false, g_InputUp = false, g_InputDown = false;
+double g_TimePrev = 0.0;
+bool g_EnableFilter = true;
+
+// Utility macros
+#define RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
+
+// Helper functions
+std::wstring GetAppPath()
 {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    std::wstring path(exePath);
+    wchar_t buffer[MAX_PATH];
+    GetModuleFileNameW(NULL, buffer, MAX_PATH);
+    std::wstring path(buffer);
     size_t pos = path.find_last_of(L"\\/");
     if (pos != std::wstring::npos)
         path = path.substr(0, pos + 1);
     return path;
 }
 
+// DDS structures
 struct DDS_PIXELFORMAT
 {
-    DWORD dwSize;
-    DWORD dwFlags;
-    DWORD dwFourCC;
-    DWORD dwRGBBitCount;
-    DWORD dwRBitMask;
-    DWORD dwGBitMask;
-    DWORD dwBBitMask;
-    DWORD dwABitMask;
+    DWORD size;
+    DWORD flags;
+    DWORD fourCC;
+    DWORD rgbBits;
+    DWORD rMask;
+    DWORD gMask;
+    DWORD bMask;
+    DWORD aMask;
 };
 
 struct DDS_HEADER
 {
-    DWORD dwSize;
-    DWORD dwHeaderFlags;
-    DWORD dwHeight;
-    DWORD dwWidth;
-    DWORD dwPitchOrLinearSize;
-    DWORD dwDepth;
-    DWORD dwMipMapCount;
-    DWORD dwReserved1[11];
-    DDS_PIXELFORMAT ddspf;
-    DWORD dwSurfaceFlags;
-    DWORD dwCubemapFlags;
-    DWORD dwReserved2[3];
+    DWORD size;
+    DWORD flags;
+    DWORD height;
+    DWORD width;
+    DWORD pitchLinear;
+    DWORD depth;
+    DWORD mipCount;
+    DWORD reserved1[11];
+    DDS_PIXELFORMAT pixelFormat;
+    DWORD caps;
+    DWORD caps2;
+    DWORD reserved2[3];
 };
 
-#define DDS_MAGIC 0x20534444
-#define DDS_HEADER_FLAGS_TEXTURE 0x00001007
-#define DDS_SURFACE_FLAGS_MIPMAP 0x00400000
-#define DDS_FOURCC 0x00000004
-#define DDS_RGB 0x00000040
+#define DDS_MAGIC_VALUE 0x20534444
+#define FOURCC_DXT1_CODE MAKEFOURCC('D','X','T','1')
+#define FOURCC_DXT3_CODE MAKEFOURCC('D','X','T','3')
+#define FOURCC_DXT5_CODE MAKEFOURCC('D','X','T','5')
 
-#define FOURCC_DXT1 MAKEFOURCC('D','X','T','1')
-#define FOURCC_DXT3 MAKEFOURCC('D','X','T','3')
-#define FOURCC_DXT5 MAKEFOURCC('D','X','T','5')
+inline UINT AlignDiv(UINT a, UINT b) { return (a + b - 1) / b; }
 
-inline UINT DivUp(UINT a, UINT b) { return (a + b - 1) / b; }
-
-UINT GetBytesPerBlock(DXGI_FORMAT fmt)
+UINT GetBlockSize(DXGI_FORMAT format)
 {
-    switch (fmt)
+    switch (format)
     {
     case DXGI_FORMAT_BC1_UNORM:
     case DXGI_FORMAT_BC4_UNORM:
@@ -99,449 +202,109 @@ UINT GetBytesPerBlock(DXGI_FORMAT fmt)
     }
 }
 
-struct TexturedVertex
+struct ImageInfo
 {
-    XMFLOAT3 pos;
-    XMFLOAT2 uv;
-};
-
-struct TexturedNormalTangentVertex
-{
-    XMFLOAT3 pos;
-    XMFLOAT3 normal;
-    XMFLOAT3 tangent;
-    XMFLOAT2 uv;
-};
-
-struct TextureDesc
-{
-    UINT32 pitch = 0;
-    UINT32 mipmapsCount = 0;
-    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+    UINT32 rowPitch = 0;
+    UINT32 levelCount = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     UINT32 width = 0;
     UINT32 height = 0;
-    void* pData = nullptr;
+    void* data = nullptr;
 };
 
-bool LoadDDS(const wchar_t* filename, TextureDesc& desc)
+bool ReadDDSFile(const wchar_t* filename, ImageInfo& info)
 {
     HANDLE hFile = CreateFileW(filename, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE)
         return false;
 
-    DWORD dwMagic;
-    DWORD dwBytesRead;
-    ReadFile(hFile, &dwMagic, sizeof(DWORD), &dwBytesRead, NULL);
-    if (dwMagic != DDS_MAGIC)
+    DWORD magic, bytesRead;
+    ReadFile(hFile, &magic, sizeof(DWORD), &bytesRead, NULL);
+    if (magic != DDS_MAGIC_VALUE)
     {
         CloseHandle(hFile);
         return false;
     }
 
     DDS_HEADER header;
-    ReadFile(hFile, &header, sizeof(DDS_HEADER), &dwBytesRead, NULL);
+    ReadFile(hFile, &header, sizeof(DDS_HEADER), &bytesRead, NULL);
 
-    desc.width = header.dwWidth;
-    desc.height = header.dwHeight;
-    desc.mipmapsCount = (header.dwSurfaceFlags & DDS_SURFACE_FLAGS_MIPMAP) ? header.dwMipMapCount : 1;
+    info.width = header.width;
+    info.height = header.height;
+    info.levelCount = (header.caps & 0x00400000) ? header.mipCount : 1;
 
-    if (header.ddspf.dwFlags & DDS_FOURCC)
+    if (header.pixelFormat.flags & 0x00000004)
     {
-        switch (header.ddspf.dwFourCC)
+        switch (header.pixelFormat.fourCC)
         {
-        case FOURCC_DXT1:
-            desc.fmt = DXGI_FORMAT_BC1_UNORM;
+        case FOURCC_DXT1_CODE:
+            info.format = DXGI_FORMAT_BC1_UNORM;
             break;
-        case FOURCC_DXT3:
-            desc.fmt = DXGI_FORMAT_BC2_UNORM;
+        case FOURCC_DXT3_CODE:
+            info.format = DXGI_FORMAT_BC2_UNORM;
             break;
-        case FOURCC_DXT5:
-            desc.fmt = DXGI_FORMAT_BC3_UNORM;
+        case FOURCC_DXT5_CODE:
+            info.format = DXGI_FORMAT_BC3_UNORM;
             break;
         default:
-            desc.fmt = DXGI_FORMAT_UNKNOWN;
+            info.format = DXGI_FORMAT_UNKNOWN;
             break;
         }
     }
-    else if (header.ddspf.dwFlags & DDS_RGB)
+    else if (header.pixelFormat.flags & 0x00000040)
     {
-        desc.fmt = DXGI_FORMAT_UNKNOWN;
+        info.format = DXGI_FORMAT_UNKNOWN;
     }
 
-    if (desc.fmt == DXGI_FORMAT_UNKNOWN)
+    if (info.format == DXGI_FORMAT_UNKNOWN)
     {
         CloseHandle(hFile);
         return false;
     }
 
-    // Tính tổng kích thước cho tất cả mip levels
     UINT totalSize = 0;
-    UINT w = desc.width;
-    UINT h = desc.height;
-    for (UINT i = 0; i < desc.mipmapsCount; ++i)
+    UINT w = info.width;
+    UINT h = info.height;
+    for (UINT i = 0; i < info.levelCount; ++i)
     {
-        UINT blockWidth = DivUp(w, 4u);
-        UINT blockHeight = DivUp(h, 4u);
-        totalSize += blockWidth * blockHeight * GetBytesPerBlock(desc.fmt);
+        UINT bw = AlignDiv(w, 4u);
+        UINT bh = AlignDiv(h, 4u);
+        totalSize += bw * bh * GetBlockSize(info.format);
         w = max(1u, w / 2);
         h = max(1u, h / 2);
     }
 
-    desc.pData = malloc(totalSize);
-    if (!desc.pData)
+    info.data = malloc(totalSize);
+    if (!info.data)
     {
         CloseHandle(hFile);
         return false;
     }
 
-    // Đọc toàn bộ dữ liệu (tất cả mip levels)
-    ReadFile(hFile, desc.pData, totalSize, &dwBytesRead, NULL);
-
+    ReadFile(hFile, info.data, totalSize, &bytesRead, NULL);
     CloseHandle(hFile);
     return true;
 }
 
-
-HWND g_hMainWindow = nullptr;
-
-ID3D11Device* g_pD3DDevice = nullptr;
-ID3D11DeviceContext* g_pD3DContext = nullptr;
-IDXGISwapChain* g_pSwapChain = nullptr;
-ID3D11RenderTargetView* g_pBackBufferRTV = nullptr;
-ID3D11DepthStencilView* g_pDepthStencilView = nullptr;
-ID3D11RasterizerState* g_pRSCullNone = nullptr;
-ID3D11ShaderResourceView* g_pNormalMapView = nullptr;
-
-ID3D11Buffer* g_pVertexBuffer = nullptr;
-ID3D11Buffer* g_pIndexBuffer = nullptr;
-
-ID3D11VertexShader* g_pVertexShader = nullptr;
-ID3D11PixelShader* g_pPixelShader = nullptr;
-ID3D11InputLayout* g_pInputLayout = nullptr;
-
-ID3D11VertexShader* g_pSkyboxVS = nullptr;
-ID3D11PixelShader* g_pSkyboxPS = nullptr;
-ID3D11InputLayout* g_pSkyboxInputLayout = nullptr;
-ID3D11Buffer* g_pSkyboxVertexBuffer = nullptr;
-ID3D11Buffer* g_pSkyboxIndexBuffer = nullptr;
-
-ID3D11VertexShader* g_pInstancedVS = nullptr;
-ID3D11PixelShader* g_pInstancedPS = nullptr;
-ID3D11InputLayout* g_pInstancedInputLayout = nullptr;
-
-struct ModelConstantBuffer
+// Core geometry
+struct VertexPacked
 {
-    XMMATRIX model;
-};
-struct ViewProjConstantBuffer
-{
-    XMMATRIX vp;
+    XMFLOAT3 position;
+    XMFLOAT3 normal;
+    XMFLOAT3 tangent;
+    XMFLOAT2 texcoord;
 };
 
-struct SceneConstantBuffer
+struct VertexSimple
 {
-    XMMATRIX vp;
-    XMFLOAT4 cameraPos;
-    XMFLOAT4 lightCount;
-    struct Light {
-        XMFLOAT4 pos;
-        XMFLOAT4 color;
-    } lights[10];
-    XMFLOAT4 ambientColor;
+    XMFLOAT3 position;
+    XMFLOAT2 texcoord;
 };
 
-struct GeomBuffer
+void BuildGeometry()
 {
-    XMMATRIX model;
-    XMMATRIX norm;
-    XMFLOAT4 shineSpeedTexIdNM;
-    XMFLOAT4 angle;
-};
-
-ID3D11Buffer* g_pSceneCB = nullptr;
-ID3D11Buffer* g_pModelCB = nullptr;
-ID3D11Buffer* g_pViewProjCB = nullptr;
-
-ID3D11ShaderResourceView* g_pTextureView = nullptr;
-ID3D11ShaderResourceView* g_pCubemapView = nullptr;
-ID3D11SamplerState* g_pSampler = nullptr;
-
-ID3D11BlendState* g_pBlendState = nullptr;
-ID3D11DepthStencilState* g_pDepthNoWrite = nullptr;
-ID3D11RasterizerState* g_pRSCullBack = nullptr;
-
-ID3D11Buffer* g_pGeomBufferInst = nullptr;
-ID3D11Buffer* g_pVisibleIdsBuffer = nullptr;
-
-GeomBuffer g_Instances[MAX_INSTANCES];
-UINT g_InstanceCount = 0;
-XMVECTOR g_LocalAABBMin = XMVectorSet(-0.5f, -0.5f, -0.5f, 0.0f);
-XMVECTOR g_LocalAABBMax = XMVectorSet(0.5f, 0.5f, 0.5f, 0.0f);
-
-ID3D11ShaderResourceView* g_pTextureArrayView = nullptr;
-
-UINT g_WindowWidth = 1280;
-UINT g_WindowHeight = 720;
-float g_CamYaw = 0.0f;
-float g_CamPitch = 0.0f;
-float g_CamDistance = 3.0f;
-bool g_KeyLeft = false, g_KeyRight = false, g_KeyUp = false, g_KeyDown = false;
-double g_LastFrameTime = 0.0;
-
-#define SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
-
-LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-bool InitializeDirect3D();
-void CreateBuffers();
-void CompileShaders();
-void LoadTextures();
-void CleanupDirect3D();
-void Render();
-void ResizeWindow(UINT newWidth, UINT newHeight);
-void UpdateCamera(double deltaTime);
-void SetupColorBuffer(UINT width, UINT height);
-
-void CreateInstances();
-void LoadTextureArray();
-void BuildFrustumPlanes(const XMMATRIX& vp, XMVECTOR planes[6]);
-void TransformAABB(const XMMATRIX& transform, const XMVECTOR& localMin, const XMVECTOR& localMax, XMVECTOR& worldMin, XMVECTOR& worldMax);
-bool IsAABBInsideFrustum(const XMVECTOR planes[6], const XMVECTOR& aabbMin, const XMVECTOR& aabbMax);
-void UpdateInstanceTransforms(double time);
-
-ID3D11Texture2D* g_pColorBuffer = nullptr;
-ID3D11RenderTargetView* g_pColorBufferRTV = nullptr;
-ID3D11ShaderResourceView* g_pColorBufferSRV = nullptr;
-
-bool g_useFilter = true;
-ID3D11PixelShader* g_pFilterPS = nullptr;
-ID3D11VertexShader* g_pFilterVS = nullptr;
-
-int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE,
-    _In_ LPWSTR, _In_ int nCmdShow)
-{
-    WNDCLASSEXW wc = {};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"D3D11CubeClass";
-
-    if (!RegisterClassExW(&wc))
-    {
-        MessageBoxW(nullptr, L"Failed to register window class", L"Error", MB_OK | MB_ICONERROR);
-        return 0;
-    }
-
-    RECT rc = { 0, 0, (LONG)g_WindowWidth, (LONG)g_WindowHeight };
-    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-    int winWidth = rc.right - rc.left;
-    int winHeight = rc.bottom - rc.top;
-
-    g_hMainWindow = CreateWindowW(wc.lpszClassName, L"Lab7: Instancing & Frustum Culling",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-        winWidth, winHeight, nullptr, nullptr, hInstance, nullptr);
-    if (!g_hMainWindow)
-    {
-        MessageBoxW(nullptr, L"Failed to create window", L"Error", MB_OK | MB_ICONERROR);
-        return 0;
-    }
-
-    ShowWindow(g_hMainWindow, nCmdShow);
-    UpdateWindow(g_hMainWindow);
-
-    if (!InitializeDirect3D())
-    {
-        CleanupDirect3D();
-        DestroyWindow(g_hMainWindow);
-        return -1;
-    }
-
-    CreateBuffers();
-    SetupColorBuffer(g_WindowWidth, g_WindowHeight);
-    CompileShaders();
-    LoadTextures();
-    LoadTextureArray();
-    CreateInstances();
-
-    D3D11_BUFFER_DESC desc = {};
-    desc.ByteWidth = sizeof(ModelConstantBuffer);
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    g_pD3DDevice->CreateBuffer(&desc, nullptr, &g_pModelCB);
-
-    desc.ByteWidth = sizeof(ViewProjConstantBuffer);
-    desc.Usage = D3D11_USAGE_DYNAMIC;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    g_pD3DDevice->CreateBuffer(&desc, nullptr, &g_pViewProjCB);
-
-    desc.ByteWidth = sizeof(SceneConstantBuffer);
-    g_pD3DDevice->CreateBuffer(&desc, nullptr, &g_pSceneCB);
-
-    desc.ByteWidth = sizeof(GeomBuffer) * MAX_INSTANCES;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    desc.CPUAccessFlags = 0;
-    g_pD3DDevice->CreateBuffer(&desc, nullptr, &g_pGeomBufferInst);
-
-    desc.ByteWidth = sizeof(XMUINT4) * MAX_INSTANCES;
-    g_pD3DDevice->CreateBuffer(&desc, nullptr, &g_pVisibleIdsBuffer);
-
-    g_LastFrameTime = (double)GetTickCount64() / 1000.0;
-
-    MSG msg = {};
-    bool done = false;
-    while (!done)
-    {
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
-        {
-            if (msg.message == WM_QUIT)
-                done = true;
-
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-
-        if (!done)
-            Render();
-    }
-
-    CleanupDirect3D();
-    return (int)msg.wParam;
-}
-
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    switch (message)
-    {
-    case WM_SIZE:
-        if (g_pSwapChain && wParam != SIZE_MINIMIZED)
-        {
-            UINT newW = LOWORD(lParam);
-            UINT newH = HIWORD(lParam);
-            if (newW > 0 && newH > 0)
-                ResizeWindow(newW, newH);
-        }
-        return 0;
-
-    case WM_KEYDOWN:
-        if (wParam == VK_LEFT)  g_KeyLeft = true;
-        if (wParam == VK_RIGHT) g_KeyRight = true;
-        if (wParam == VK_UP)    g_KeyUp = true;
-        if (wParam == VK_DOWN)  g_KeyDown = true;
-        if (wParam == 'F')      g_useFilter = !g_useFilter;
-        return 0;
-
-    case WM_KEYUP:
-        if (wParam == VK_LEFT)  g_KeyLeft = false;
-        if (wParam == VK_RIGHT) g_KeyRight = false;
-        if (wParam == VK_UP)    g_KeyUp = false;
-        if (wParam == VK_DOWN)  g_KeyDown = false;
-        return 0;
-
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(hWnd, message, wParam, lParam);
-}
-
-bool InitializeDirect3D()
-{
-    HRESULT hr;
-
-    UINT flags = 0;
-#ifdef _DEBUG
-    flags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
-
-    DXGI_SWAP_CHAIN_DESC scd = {};
-    scd.BufferCount = 2;
-    scd.BufferDesc.Width = g_WindowWidth;
-    scd.BufferDesc.Height = g_WindowHeight;
-    scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    scd.BufferDesc.RefreshRate.Numerator = 60;
-    scd.BufferDesc.RefreshRate.Denominator = 1;
-    scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    scd.OutputWindow = g_hMainWindow;
-    scd.SampleDesc.Count = 1;
-    scd.SampleDesc.Quality = 0;
-    scd.Windowed = TRUE;
-    scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-
-    D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
-    D3D_FEATURE_LEVEL obtainedLevel;
-
-    hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
-        flags, levels, 1, D3D11_SDK_VERSION,
-        &scd, &g_pSwapChain, &g_pD3DDevice, &obtainedLevel, &g_pD3DContext
-    );
-
-    if (FAILED(hr))
-        return false;
-
-    ID3D11Texture2D* pBackBuffer = nullptr;
-    hr = g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer);
-    if (FAILED(hr)) return false;
-
-    hr = g_pD3DDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_pBackBufferRTV);
-    pBackBuffer->Release();
-    if (FAILED(hr)) return false;
-
-    D3D11_TEXTURE2D_DESC depthDesc = {};
-    depthDesc.Width = g_WindowWidth;
-    depthDesc.Height = g_WindowHeight;
-    depthDesc.MipLevels = 1;
-    depthDesc.ArraySize = 1;
-    depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
-    depthDesc.SampleDesc.Count = 1;
-    depthDesc.SampleDesc.Quality = 0;
-    depthDesc.Usage = D3D11_USAGE_DEFAULT;
-    depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-
-    ID3D11Texture2D* pDepthStencil = nullptr;
-    hr = g_pD3DDevice->CreateTexture2D(&depthDesc, nullptr, &pDepthStencil);
-    if (FAILED(hr)) return false;
-
-    hr = g_pD3DDevice->CreateDepthStencilView(pDepthStencil, nullptr, &g_pDepthStencilView);
-    pDepthStencil->Release();
-    if (FAILED(hr)) return false;
-
-    return true;
-}
-
-void SetupColorBuffer(UINT width, UINT height)
-{
-    SAFE_RELEASE(g_pColorBuffer);
-    SAFE_RELEASE(g_pColorBufferRTV);
-    SAFE_RELEASE(g_pColorBufferSRV);
-
-    D3D11_TEXTURE2D_DESC desc = {};
-    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.ArraySize = 1;
-    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    desc.CPUAccessFlags = 0;
-    desc.MiscFlags = 0;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.Height = height;
-    desc.Width = width;
-    desc.MipLevels = 1;
-
-    HRESULT hr = g_pD3DDevice->CreateTexture2D(&desc, nullptr, &g_pColorBuffer);
-    if (SUCCEEDED(hr))
-        hr = g_pD3DDevice->CreateRenderTargetView(g_pColorBuffer, nullptr, &g_pColorBufferRTV);
-    if (SUCCEEDED(hr))
-        hr = g_pD3DDevice->CreateShaderResourceView(g_pColorBuffer, nullptr, &g_pColorBufferSRV);
-    assert(SUCCEEDED(hr));
-}
-
-void CreateBuffers()
-{
-    const TexturedNormalTangentVertex cubeVertices[] = {
+    const VertexPacked cubeVerts[] = {
         // Back face
         { XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT3(0,0,-1), XMFLOAT3(1,0,0), XMFLOAT2(0,1) },
         { XMFLOAT3(0.5f, -0.5f, -0.5f), XMFLOAT3(0,0,-1), XMFLOAT3(1,0,0), XMFLOAT2(1,1) },
@@ -584,18 +347,18 @@ void CreateBuffers()
     };
 
     D3D11_BUFFER_DESC desc = {};
-    desc.ByteWidth = sizeof(cubeVertices);
+    desc.ByteWidth = sizeof(cubeVerts);
     desc.Usage = D3D11_USAGE_IMMUTABLE;
     desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA data = { cubeVertices };
-    g_pD3DDevice->CreateBuffer(&desc, &data, &g_pVertexBuffer);
+    D3D11_SUBRESOURCE_DATA data = { cubeVerts };
+    g_Device->CreateBuffer(&desc, &data, &g_VertexBuffer);
 
     desc.ByteWidth = sizeof(cubeIndices);
     desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
     data.pSysMem = cubeIndices;
-    g_pD3DDevice->CreateBuffer(&desc, &data, &g_pIndexBuffer);
+    g_Device->CreateBuffer(&desc, &data, &g_IndexBuffer);
 
-    const TexturedVertex skyboxVertices[] = {
+    const VertexSimple skyVerts[] = {
         { XMFLOAT3(-10, -10, -10), XMFLOAT2(0,0) },
         { XMFLOAT3(10, -10, -10), XMFLOAT2(0,0) },
         { XMFLOAT3(10,  10, -10), XMFLOAT2(0,0) },
@@ -605,140 +368,142 @@ void CreateBuffers()
         { XMFLOAT3(10,  10,  10), XMFLOAT2(0,0) },
         { XMFLOAT3(-10,  10,  10), XMFLOAT2(0,0) }
     };
-    const USHORT skyboxIndices[] = {
+
+    const USHORT skyIndices[] = {
         0,2,1, 0,3,2,  4,5,6, 4,6,7,  0,7,3, 0,4,7,
         1,2,6, 1,6,5,  3,7,6, 3,6,2,  0,1,5, 0,5,4
     };
 
-    desc.ByteWidth = sizeof(skyboxVertices);
+    desc.ByteWidth = sizeof(skyVerts);
     desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    data.pSysMem = skyboxVertices;
-    g_pD3DDevice->CreateBuffer(&desc, &data, &g_pSkyboxVertexBuffer);
+    data.pSysMem = skyVerts;
+    g_Device->CreateBuffer(&desc, &data, &g_SkyboxVB);
 
-    desc.ByteWidth = sizeof(skyboxIndices);
+    desc.ByteWidth = sizeof(skyIndices);
     desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
-    data.pSysMem = skyboxIndices;
-    g_pD3DDevice->CreateBuffer(&desc, &data, &g_pSkyboxIndexBuffer);
+    data.pSysMem = skyIndices;
+    g_Device->CreateBuffer(&desc, &data, &g_SkyboxIB);
 }
 
-void CompileShaders()
+// Shader compilation
+void SetupShaders()
 {
-    const char* vertexShaderCode = R"(
-        cbuffer ModelCB : register(b0) { float4x4 model; }
+    const char* mainVS = R"(
+        cbuffer WorldCB : register(b0) { float4x4 world; }
         cbuffer ViewProjCB : register(b1) { float4x4 vp; }
-        struct VSInput {
+        struct VS_IN {
             float3 pos : POSITION;
-            float3 normal : NORMAL;
-            float3 tangent : TANGENT;
+            float3 norm : NORMAL;
+            float3 tang : TANGENT;
             float2 uv : TEXCOORD;
         };
-        struct VSOutput {
+        struct VS_OUT {
             float4 pos : SV_Position;
-            float3 worldPos : TEXCOORD0;
-            float3 worldNormal : NORMAL;
-            float3 worldTangent : TANGENT;
+            float3 wPos : TEXCOORD0;
+            float3 wNorm : NORMAL;
+            float3 wTang : TANGENT;
             float2 uv : TEXCOORD1;
         };
-        VSOutput vs(VSInput v) {
-            VSOutput o;
-            float4 worldPos = mul(float4(v.pos, 1.0), model);
-            o.pos = mul(worldPos, vp);
-            o.worldPos = worldPos.xyz;
-            float3x3 normalMatrix = (float3x3)model;
-            o.worldNormal = normalize(mul(v.normal, normalMatrix));
-            o.worldTangent = normalize(mul(v.tangent, normalMatrix));
-            o.uv = v.uv;
-            return o;
+        VS_OUT vs_main(VS_IN input) {
+            VS_OUT output;
+            float4 worldPos = mul(float4(input.pos, 1.0), world);
+            output.pos = mul(worldPos, vp);
+            output.wPos = worldPos.xyz;
+            float3x3 normalMat = (float3x3)world;
+            output.wNorm = normalize(mul(input.norm, normalMat));
+            output.wTang = normalize(mul(input.tang, normalMat));
+            output.uv = input.uv;
+            return output;
         }
     )";
 
-    const char* pixelShaderCode = R"(
-        Texture2D colorTexture : register(t0);
-        Texture2D normalMap : register(t1);
-        SamplerState colorSampler : register(s0);
-        cbuffer SceneCB : register(b2) {
+    const char* mainPS = R"(
+        Texture2D colorTex : register(t0);
+        Texture2D normalTex : register(t1);
+        SamplerState samplerState : register(s0);
+        cbuffer FrameCB : register(b2) {
             float4x4 vp;
-            float4 cameraPos;
+            float4 camPos;
             float4 lightCount;
             struct Light {
                 float4 pos;
                 float4 color;
             } lights[10];
-            float4 ambientColor;
+            float4 ambient;
         };
-        struct VSOutput {
+        struct VS_OUT {
             float4 pos : SV_Position;
-            float3 worldPos : TEXCOORD0;
-            float3 worldNormal : NORMAL;
-            float3 worldTangent : TANGENT;
+            float3 wPos : TEXCOORD0;
+            float3 wNorm : NORMAL;
+            float3 wTang : TANGENT;
             float2 uv : TEXCOORD1;
         };
-        float4 ps(VSOutput p) : SV_Target0 {
-            float4 texColor = colorTexture.Sample(colorSampler, p.uv);
-            float3 tangentNormal = normalMap.Sample(colorSampler, p.uv).xyz * 2.0 - 1.0;
-            float3 N = normalize(p.worldNormal);
-            float3 T = normalize(p.worldTangent);
+        float4 ps_main(VS_OUT input) : SV_Target0 {
+            float4 texColor = colorTex.Sample(samplerState, input.uv);
+            float3 tangentNorm = normalTex.Sample(samplerState, input.uv).xyz * 2.0 - 1.0;
+            float3 N = normalize(input.wNorm);
+            float3 T = normalize(input.wTang);
             float3 B = cross(N, T);
             float3x3 TBN = float3x3(T, B, N);
-            float3 worldNormal = normalize(mul(tangentNormal, TBN));
-            float3 finalColor = ambientColor.xyz * texColor.xyz;
+            float3 worldNormal = normalize(mul(tangentNorm, TBN));
+            float3 result = ambient.xyz * texColor.xyz;
             for (int i = 0; i < lightCount.x; ++i) {
-                float3 L = lights[i].pos.xyz - p.worldPos.xyz;
+                float3 L = lights[i].pos.xyz - input.wPos.xyz;
                 float dist = length(L);
                 L = L / dist;
                 float atten = 1.0 / (1.0 + 0.1 * dist + 0.01 * dist * dist);
                 float diff = max(dot(worldNormal, L), 0.0);
-                finalColor += texColor.xyz * diff * atten * lights[i].color.xyz;
-                float3 V = normalize(cameraPos.xyz - p.worldPos.xyz);
+                result += texColor.xyz * diff * atten * lights[i].color.xyz;
+                float3 V = normalize(camPos.xyz - input.wPos.xyz);
                 float3 R = reflect(-L, worldNormal);
                 float spec = pow(max(dot(V, R), 0.0), 32.0);
-                finalColor += spec * atten * lights[i].color.xyz;
+                result += spec * atten * lights[i].color.xyz;
             }
-            return float4(finalColor, 1.0);
+            return float4(result, 1.0);
         }
     )";
 
-    const char* skyboxVS = R"(
+    const char* skyVS = R"(
         cbuffer ViewProjCB : register(b1) { float4x4 vp; }
-        struct VSInput { float3 pos : POSITION; float2 uv : TEXCOORD; };
-        struct VSOutput { float4 pos : SV_Position; float3 localPos : TEXCOORD; };
-        VSOutput vs(VSInput v) {
-            VSOutput o;
-            o.pos = mul(float4(v.pos, 1.0), vp);
-            o.localPos = v.pos;
-            return o;
+        struct VS_IN { float3 pos : POSITION; float2 uv : TEXCOORD; };
+        struct VS_OUT { float4 pos : SV_Position; float3 texCoord : TEXCOORD; };
+        VS_OUT vs_main(VS_IN input) {
+            VS_OUT output;
+            output.pos = mul(float4(input.pos, 1.0), vp);
+            output.texCoord = input.pos;
+            return output;
         }
     )";
 
-    const char* skyboxPS = R"(
-        TextureCube skyboxTexture : register(t1);
-        SamplerState skyboxSampler : register(s1);
-        struct VSOutput { float4 pos : SV_Position; float3 localPos : TEXCOORD; };
-        float4 ps(VSOutput p) : SV_Target0 {
-            return skyboxTexture.Sample(skyboxSampler, p.localPos);
+    const char* skyPS = R"(
+        TextureCube skyTex : register(t1);
+        SamplerState skySampler : register(s1);
+        struct VS_OUT { float4 pos : SV_Position; float3 texCoord : TEXCOORD; };
+        float4 ps_main(VS_OUT input) : SV_Target0 {
+            return skyTex.Sample(skySampler, input.texCoord);
         }
     )";
 
     const char* instancedVS = R"(
-        cbuffer GeomBufferInst : register(b1)
+        cbuffer InstanceData : register(b1)
         {
-            struct GeomBuffer
+            struct InstanceProps
             {
-                float4x4 model;
-                float4x4 norm;
-                float4 shineSpeedTexIdNM;
-                float4 angle;
-            } geomBuffer[100];
+                float4x4 world;
+                float4x4 worldInvTrans;
+                float4 material;
+                float4 rotation;
+            } instances[100];
         };
         cbuffer ViewProjCB : register(b2)
         {
             float4x4 vp;
         };
-        cbuffer VisibleIds : register(b3) 
+        cbuffer VisibleList : register(b3) 
         {
-            uint4 ids[100];
+            uint4 indices[100];
         };
-        struct VSInput
+        struct VS_IN
         {
             float3 pos    : POSITION;
             float3 tang   : TANGENT;
@@ -746,132 +511,132 @@ void CompileShaders()
             float2 uv     : TEXCOORD;
             uint instanceId : SV_InstanceID;
         };
-        struct VSOutput
+        struct VS_OUT
         {
             float4 pos       : SV_Position;
             float4 worldPos  : POSITION;
             float3 tang      : TANGENT;
             float3 norm      : NORMAL;
             float2 uv        : TEXCOORD;
-            nointerpolation uint instanceId : INST_ID;
+            nointerpolation uint id : INST_ID;
         };
-        VSOutput vs(VSInput v)
+        VS_OUT vs_main(VS_IN input)
         {
-            VSOutput o;
-            uint globalIdx = ids[v.instanceId].x;   
-            float4 worldPos = mul(geomBuffer[globalIdx].model, float4(v.pos, 1.0));
-            o.pos = mul(worldPos, vp);
-            o.worldPos = worldPos;
-            o.uv = v.uv;
-            o.tang = mul(geomBuffer[globalIdx].norm, float4(v.tang, 0)).xyz;
-            o.norm = mul(geomBuffer[globalIdx].norm, float4(v.norm, 0)).xyz;
-            o.instanceId = v.instanceId; 
-            return o;
+            VS_OUT output;
+            uint globalId = indices[input.instanceId].x;   
+            float4 worldPos = mul(instances[globalId].world, float4(input.pos, 1.0));
+            output.pos = mul(worldPos, vp);
+            output.worldPos = worldPos;
+            output.uv = input.uv;
+            output.tang = mul(instances[globalId].worldInvTrans, float4(input.tang, 0)).xyz;
+            output.norm = mul(instances[globalId].worldInvTrans, float4(input.norm, 0)).xyz;
+            output.id = input.instanceId; 
+            return output;
         }
     )";
 
     const char* instancedPS = R"(
-        Texture2DArray colorTexture : register(t0);
-        Texture2D normalMapTexture : register(t1);
-        SamplerState colorSampler : register(s0);
-        cbuffer GeomBufferInst : register(b1)
+        Texture2DArray colorArray : register(t0);
+        Texture2D normalMap : register(t1);
+        SamplerState samplerState : register(s0);
+        cbuffer InstanceData : register(b1)
         {
-            struct GeomBuffer
+            struct InstanceProps
             {
-                float4x4 model;
-                float4x4 norm;
-                float4 shineSpeedTexIdNM;
-                float4 angle;
-            } geomBuffer[100];
+                float4x4 world;
+                float4x4 worldInvTrans;
+                float4 material;
+                float4 rotation;
+            } instances[100];
         };
-        cbuffer SceneCB : register(b3)
+        cbuffer FrameCB : register(b3)
         {
             float4x4 vp;
-            float4 cameraPos;
+            float4 camPos;
             float4 lightCount;
             struct Light
             {
                 float4 pos;
                 float4 color;
             } lights[10];
-            float4 ambientColor;
+            float4 ambient;
         };
-        cbuffer VisibleIds : register(b4)
+        cbuffer VisibleList : register(b4)
         {
-            uint4 ids[100];
+            uint4 indices[100];
         };
-        struct VSOutput
+        struct VS_OUT
         {
             float4 pos       : SV_Position;
             float4 worldPos  : POSITION;
             float3 tang      : TANGENT;
             float3 norm      : NORMAL;
             float2 uv        : TEXCOORD;
-            nointerpolation uint instanceId : INST_ID;
+            nointerpolation uint id : INST_ID;
         };
-        float4 ps(VSOutput pixel) : SV_Target0
+        float4 ps_main(VS_OUT input) : SV_Target0
         {
-            uint idx = ids[pixel.instanceId].x;
-            uint texId = (uint)geomBuffer[idx].shineSpeedTexIdNM.z;
-            float3 color = colorTexture.Sample(colorSampler, float3(pixel.uv, texId)).xyz;
-            uint flags = asuint(geomBuffer[idx].shineSpeedTexIdNM.w);
+            uint idx = indices[input.id].x;
+            uint texId = (uint)instances[idx].material.z;
+            float3 color = colorArray.Sample(samplerState, float3(input.uv, texId)).xyz;
+            uint flags = asuint(instances[idx].material.w);
             float3 normal;
             if (flags == 1 && lightCount.y > 0)
             {
-                float3 tangentNormal = normalMapTexture.Sample(colorSampler, pixel.uv).xyz * 2.0 - 1.0;
-                float3 N = normalize(pixel.norm);
-                float3 T = normalize(pixel.tang);
+                float3 tangentNormal = normalMap.Sample(samplerState, input.uv).xyz * 2.0 - 1.0;
+                float3 N = normalize(input.norm);
+                float3 T = normalize(input.tang);
                 float3 B = cross(N, T);
                 normal = normalize(tangentNormal.x * T + tangentNormal.y * B + tangentNormal.z * N);
             }
             else
             {
-                normal = normalize(pixel.norm);
+                normal = normalize(input.norm);
             }
-            float shininess = geomBuffer[idx].shineSpeedTexIdNM.x;
-            float3 finalColor = ambientColor.xyz * color;
+            float shininess = instances[idx].material.x;
+            float3 result = ambient.xyz * color;
             for (int i = 0; i < lightCount.x; ++i)
             {
-                float3 L = lights[i].pos.xyz - pixel.worldPos.xyz;
+                float3 L = lights[i].pos.xyz - input.worldPos.xyz;
                 float dist = length(L);
                 L = L / dist;
                 float atten = 1.0 / (1.0 + 0.1 * dist + 0.01 * dist * dist);
                 float diff = max(dot(normal, L), 0.0);
-                finalColor += color * diff * atten * lights[i].color.xyz;
-                float3 V = normalize(cameraPos.xyz - pixel.worldPos.xyz);
+                result += color * diff * atten * lights[i].color.xyz;
+                float3 V = normalize(camPos.xyz - input.worldPos.xyz);
                 float3 R = reflect(-L, normal);
                 float spec = pow(max(dot(V, R), 0.0), shininess);
-                finalColor += spec * atten * lights[i].color.xyz;
+                result += spec * atten * lights[i].color.xyz;
             }
-            return float4(finalColor, 1.0);
+            return float4(result, 1.0);
         }
     )";
 
-    const char* filterVS = R"(
-        struct VSInput { uint vertexId : SV_VertexID; };
-        struct VSOutput { float4 pos : SV_Position; float2 uv : TEXCOORD; };
-        VSOutput vs(VSInput v) {
-            VSOutput o;
+    const char* postVS = R"(
+        struct VS_IN { uint id : SV_VertexID; };
+        struct VS_OUT { float4 pos : SV_Position; float2 uv : TEXCOORD; };
+        VS_OUT vs_main(VS_IN input) {
+            VS_OUT output;
             float4 pos = float4(0,0,0,0);
-            switch (v.vertexId) {
+            switch (input.id) {
                 case 0: pos = float4(-1, 1, 0, 1); break;
                 case 1: pos = float4(3,  1, 0, 1); break;
-                case 2: pos = float4( -1, -3, 0, 1); break;
+                case 2: pos = float4(-1, -3, 0, 1); break;
             }
-            o.pos = pos;
-            o.uv = float2(pos.x * 0.5 + 0.5, 0.5 - pos.y * 0.5);
-            return o;
+            output.pos = pos;
+            output.uv = float2(pos.x * 0.5 + 0.5, 0.5 - pos.y * 0.5);
+            return output;
         }
     )";
 
-    const char* filterPS = R"(
-        Texture2D colorTexture : register(t0);
-        SamplerState colorSampler : register(s0);
-        struct VSOutput { float4 pos : SV_Position; float2 uv : TEXCOORD; };
-        float4 ps(VSOutput i) : SV_Target0 {
-            float3 color = colorTexture.Sample(colorSampler, i.uv).rgb;
-            float gray = dot(color, float3(0.299, 0.587, 0.114));
-            return float4(gray, gray, gray, 1.0);
+    const char* postPS = R"(
+        Texture2D sceneTex : register(t0);
+        SamplerState samplerState : register(s0);
+        struct VS_OUT { float4 pos : SV_Position; float2 uv : TEXCOORD; };
+        float4 ps_main(VS_OUT input) : SV_Target0 {
+            float3 color = sceneTex.Sample(samplerState, input.uv).rgb;
+            float luminance = dot(color, float3(0.299, 0.587, 0.114));
+            return float4(luminance, luminance, luminance, 1.0);
         }
     )";
 
@@ -880,170 +645,194 @@ void CompileShaders()
     flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
 
-    ID3DBlob* pVsBlob = nullptr, * pPsBlob = nullptr, * pErrorBlob = nullptr;
+    ID3DBlob* vsBlob = nullptr, * psBlob = nullptr, * errorBlob = nullptr;
 
-    D3DCompile(vertexShaderCode, strlen(vertexShaderCode), nullptr, nullptr, nullptr, "vs", "vs_5_0", flags, 0, &pVsBlob, &pErrorBlob);
-    if (pErrorBlob) { OutputDebugStringA((const char*)pErrorBlob->GetBufferPointer()); pErrorBlob->Release(); }
-    g_pD3DDevice->CreateVertexShader(pVsBlob->GetBufferPointer(), pVsBlob->GetBufferSize(), nullptr, &g_pVertexShader);
+    // Main shaders
+    D3DCompile(mainVS, strlen(mainVS), nullptr, nullptr, nullptr, "vs_main", "vs_5_0", flags, 0, &vsBlob, &errorBlob);
+    if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
+    g_Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_MainVS);
 
-    D3DCompile(pixelShaderCode, strlen(pixelShaderCode), nullptr, nullptr, nullptr, "ps", "ps_5_0", flags, 0, &pPsBlob, &pErrorBlob);
-    if (pErrorBlob) { OutputDebugStringA((const char*)pErrorBlob->GetBufferPointer()); pErrorBlob->Release(); }
-    g_pD3DDevice->CreatePixelShader(pPsBlob->GetBufferPointer(), pPsBlob->GetBufferSize(), nullptr, &g_pPixelShader);
-    SAFE_RELEASE(pPsBlob);
+    D3DCompile(mainPS, strlen(mainPS), nullptr, nullptr, nullptr, "ps_main", "ps_5_0", flags, 0, &psBlob, &errorBlob);
+    if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
+    g_Device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_MainPS);
+    RELEASE(psBlob);
 
-    D3D11_INPUT_ELEMENT_DESC layout[] = {
+    D3D11_INPUT_ELEMENT_DESC layoutDesc[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 36, D3D11_INPUT_PER_VERTEX_DATA, 0}
     };
-    g_pD3DDevice->CreateInputLayout(layout, 4, pVsBlob->GetBufferPointer(), pVsBlob->GetBufferSize(), &g_pInputLayout);
-    SAFE_RELEASE(pVsBlob);
+    g_Device->CreateInputLayout(layoutDesc, 4, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_MainLayout);
+    RELEASE(vsBlob);
 
-    D3DCompile(instancedVS, strlen(instancedVS), nullptr, nullptr, nullptr, "vs", "vs_5_0", flags, 0, &pVsBlob, &pErrorBlob);
-    if (pErrorBlob) { OutputDebugStringA((const char*)pErrorBlob->GetBufferPointer()); pErrorBlob->Release(); }
-    g_pD3DDevice->CreateVertexShader(pVsBlob->GetBufferPointer(), pVsBlob->GetBufferSize(), nullptr, &g_pInstancedVS);
+    // Instanced shaders
+    D3DCompile(instancedVS, strlen(instancedVS), nullptr, nullptr, nullptr, "vs_main", "vs_5_0", flags, 0, &vsBlob, &errorBlob);
+    if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
+    g_Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_InstancedVS);
 
-    D3DCompile(instancedPS, strlen(instancedPS), nullptr, nullptr, nullptr, "ps", "ps_5_0", flags, 0, &pPsBlob, &pErrorBlob);
-    if (pErrorBlob) { OutputDebugStringA((const char*)pErrorBlob->GetBufferPointer()); pErrorBlob->Release(); }
-    g_pD3DDevice->CreatePixelShader(pPsBlob->GetBufferPointer(), pPsBlob->GetBufferSize(), nullptr, &g_pInstancedPS);
-    SAFE_RELEASE(pPsBlob);
+    D3DCompile(instancedPS, strlen(instancedPS), nullptr, nullptr, nullptr, "ps_main", "ps_5_0", flags, 0, &psBlob, &errorBlob);
+    if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
+    g_Device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_InstancedPS);
+    RELEASE(psBlob);
 
-    D3D11_INPUT_ELEMENT_DESC layoutInst[] = {
+    D3D11_INPUT_ELEMENT_DESC instLayout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 36, D3D11_INPUT_PER_VERTEX_DATA, 0}
     };
-    g_pD3DDevice->CreateInputLayout(layoutInst, 4, pVsBlob->GetBufferPointer(), pVsBlob->GetBufferSize(), &g_pInstancedInputLayout);
-    SAFE_RELEASE(pVsBlob);
+    g_Device->CreateInputLayout(instLayout, 4, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_InstancedLayout);
+    RELEASE(vsBlob);
 
-    D3DCompile(skyboxVS, strlen(skyboxVS), nullptr, nullptr, nullptr, "vs", "vs_5_0", flags, 0, &pVsBlob, &pErrorBlob);
-    if (pErrorBlob) { OutputDebugStringA((const char*)pErrorBlob->GetBufferPointer()); pErrorBlob->Release(); }
-    g_pD3DDevice->CreateVertexShader(pVsBlob->GetBufferPointer(), pVsBlob->GetBufferSize(), nullptr, &g_pSkyboxVS);
+    // Skybox shaders
+    D3DCompile(skyVS, strlen(skyVS), nullptr, nullptr, nullptr, "vs_main", "vs_5_0", flags, 0, &vsBlob, &errorBlob);
+    if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
+    g_Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_SkyboxVS);
 
-    D3DCompile(skyboxPS, strlen(skyboxPS), nullptr, nullptr, nullptr, "ps", "ps_5_0", flags, 0, &pPsBlob, &pErrorBlob);
-    if (pErrorBlob) { OutputDebugStringA((const char*)pErrorBlob->GetBufferPointer()); pErrorBlob->Release(); }
-    g_pD3DDevice->CreatePixelShader(pPsBlob->GetBufferPointer(), pPsBlob->GetBufferSize(), nullptr, &g_pSkyboxPS);
+    D3DCompile(skyPS, strlen(skyPS), nullptr, nullptr, nullptr, "ps_main", "ps_5_0", flags, 0, &psBlob, &errorBlob);
+    if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
+    g_Device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_SkyboxPS);
 
-    D3D11_INPUT_ELEMENT_DESC layoutSky[] = {
+    D3D11_INPUT_ELEMENT_DESC skyLayout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0}
     };
-    g_pD3DDevice->CreateInputLayout(layoutSky, 2, pVsBlob->GetBufferPointer(), pVsBlob->GetBufferSize(), &g_pSkyboxInputLayout);
-    SAFE_RELEASE(pVsBlob);
+    g_Device->CreateInputLayout(skyLayout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_SkyboxLayout);
+    RELEASE(vsBlob);
+    RELEASE(psBlob);
 
-    ID3DBlob* pFilterVSBlob = nullptr;
-    ID3DBlob* pFilterPSBlob = nullptr;
-    D3DCompile(filterVS, strlen(filterVS), nullptr, nullptr, nullptr, "vs", "vs_5_0", flags, 0, &pFilterVSBlob, &pErrorBlob);
-    if (pErrorBlob)
-    {
-        if (pErrorBlob) OutputDebugStringA((const char*)pErrorBlob->GetBufferPointer());
-        SAFE_RELEASE(pErrorBlob);
-    }
-    else
-    {
-        g_pD3DDevice->CreateVertexShader(pFilterVSBlob->GetBufferPointer(), pFilterVSBlob->GetBufferSize(), nullptr, &g_pFilterVS);
-        SAFE_RELEASE(pFilterVSBlob);
-    }
+    // Post-process shaders
+    ID3DBlob* postVSBlob = nullptr;
+    ID3DBlob* postPSBlob = nullptr;
+    D3DCompile(postVS, strlen(postVS), nullptr, nullptr, nullptr, "vs_main", "vs_5_0", flags, 0, &postVSBlob, &errorBlob);
+    if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); RELEASE(errorBlob); }
+    else { g_Device->CreateVertexShader(postVSBlob->GetBufferPointer(), postVSBlob->GetBufferSize(), nullptr, &g_PostVS); RELEASE(postVSBlob); }
 
-    D3DCompile(filterPS, strlen(filterPS), nullptr, nullptr, nullptr, "ps", "ps_5_0", flags, 0, &pFilterPSBlob, &pErrorBlob);
-    if (pErrorBlob) {
-        OutputDebugStringA((const char*)pErrorBlob->GetBufferPointer());
-        SAFE_RELEASE(pErrorBlob);
-    }
-    else
-    {
-        g_pD3DDevice->CreatePixelShader(pFilterPSBlob->GetBufferPointer(), pFilterPSBlob->GetBufferSize(), nullptr, &g_pFilterPS);
-        SAFE_RELEASE(pFilterPSBlob);
-    }
-
-    SAFE_RELEASE(pPsBlob);
+    D3DCompile(postPS, strlen(postPS), nullptr, nullptr, nullptr, "ps_main", "ps_5_0", flags, 0, &postPSBlob, &errorBlob);
+    if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); RELEASE(errorBlob); }
+    else { g_Device->CreatePixelShader(postPSBlob->GetBufferPointer(), postPSBlob->GetBufferSize(), nullptr, &g_PostPS); RELEASE(postPSBlob); }
 }
 
-void LoadTextures()
+// Texture loading
+void LoadMaterials()
 {
     HRESULT hr;
 
-    TextureDesc texDesc;
-    std::wstring fullPath = GetExePath() + L"..\\..\\texture\\Brick.dds";
-    if (!LoadDDS(fullPath.c_str(), texDesc))
+    ImageInfo texInfo;
+    std::wstring fullPath = GetAppPath() + L"..\\..\\texture\\Brick.dds";
+    if (!ReadDDSFile(fullPath.c_str(), texInfo))
     {
         MessageBoxA(NULL, "Failed to load Brick.dds", "Error", MB_OK);
         return;
     }
 
-    D3D11_TEXTURE2D_DESC tex2DDesc = {};
-    tex2DDesc.Width = texDesc.width;
-    tex2DDesc.Height = texDesc.height;
-    tex2DDesc.MipLevels = 1;
-    tex2DDesc.ArraySize = 1;
-    tex2DDesc.Format = texDesc.fmt;
-    tex2DDesc.SampleDesc.Count = 1;
-    tex2DDesc.SampleDesc.Quality = 0;
-    tex2DDesc.Usage = D3D11_USAGE_IMMUTABLE;
-    tex2DDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = texInfo.width;
+    texDesc.Height = texInfo.height;
+    texDesc.MipLevels = texInfo.levelCount;
+    texDesc.ArraySize = 1;
+    texDesc.Format = texInfo.format;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Usage = D3D11_USAGE_IMMUTABLE;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
-    UINT blockWidth = DivUp(texDesc.width, 4u);
-    UINT blockHeight = DivUp(texDesc.height, 4u);
-    UINT pitch = blockWidth * GetBytesPerBlock(texDesc.fmt);
+    std::vector<D3D11_SUBRESOURCE_DATA> texData(texInfo.levelCount);
 
-    D3D11_SUBRESOURCE_DATA texData = {};
-    texData.pSysMem = texDesc.pData;
-    texData.SysMemPitch = pitch;
+    UINT blockW = 0;
+    UINT blockH = 0;
+    UINT rowPitch = 0;
+
+    UINT curWidth = texInfo.width;
+    UINT curHeight = texInfo.height;
+    UINT offset = 0;
+
+    for (UINT mip = 0; mip < texInfo.levelCount; ++mip)
+    {
+        blockW = AlignDiv(curWidth, 4u);
+        blockH = AlignDiv(curHeight, 4u);
+        rowPitch = blockW * GetBlockSize(texInfo.format);
+
+        texData[mip].pSysMem = (BYTE*)texInfo.data + offset;
+        texData[mip].SysMemPitch = rowPitch;
+        texData[mip].SysMemSlicePitch = 0;
+
+        offset += rowPitch * blockH;
+
+        curWidth = max(1u, curWidth / 2);
+        curHeight = max(1u, curHeight / 2);
+    }
 
     ID3D11Texture2D* pTexture = nullptr;
-    hr = g_pD3DDevice->CreateTexture2D(&tex2DDesc, &texData, &pTexture);
-    free(texDesc.pData);
-    if (FAILED(hr)) return;
-
-    std::wstring normalPath = GetExePath() + L"..\\..\\texture\\BrickNM.dds";
-    TextureDesc normalDesc;
-    if (LoadDDS(normalPath.c_str(), normalDesc))
-    {
-        D3D11_TEXTURE2D_DESC normTexDesc = {};
-        normTexDesc.Width = normalDesc.width;
-        normTexDesc.Height = normalDesc.height;
-        normTexDesc.MipLevels = 1;
-        normTexDesc.ArraySize = 1;
-        normTexDesc.Format = normalDesc.fmt;
-        normTexDesc.SampleDesc.Count = 1;
-        normTexDesc.SampleDesc.Quality = 0;
-        normTexDesc.Usage = D3D11_USAGE_IMMUTABLE;
-        normTexDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-        UINT normBlockWidth = DivUp(normalDesc.width, 4u);
-        UINT normBlockHeight = DivUp(normalDesc.height, 4u);
-        UINT normPitch = normBlockWidth * GetBytesPerBlock(normalDesc.fmt);
-
-        D3D11_SUBRESOURCE_DATA normData = {};
-        normData.pSysMem = normalDesc.pData;
-        normData.SysMemPitch = normPitch;
-
-        ID3D11Texture2D* pNormalTex = nullptr;
-        HRESULT hr = g_pD3DDevice->CreateTexture2D(&normTexDesc, &normData, &pNormalTex);
-        if (SUCCEEDED(hr))
-        {
-            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-            srvDesc.Format = normalDesc.fmt;
-            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            srvDesc.Texture2D.MipLevels = 1;
-            hr = g_pD3DDevice->CreateShaderResourceView(pNormalTex, &srvDesc, &g_pNormalMapView);
-            pNormalTex->Release();
-        }
-        free(normalDesc.pData);
-    }
-    else {
-        OutputDebugStringA("No normal map loaded, using flat normals\n");
-    }
+    hr = g_Device->CreateTexture2D(&texDesc, texData.data(), &pTexture);
+    free(texInfo.data);
+    if (FAILED(hr))
+        return;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = texDesc.fmt;
+    srvDesc.Format = texInfo.format;
     srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = 1;
-    hr = g_pD3DDevice->CreateShaderResourceView(pTexture, &srvDesc, &g_pTextureView);
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.MipLevels = texInfo.levelCount;
+    hr = g_Device->CreateShaderResourceView(pTexture, &srvDesc, &g_MainTexture);
     pTexture->Release();
-    if (FAILED(hr)) return;
+    if (FAILED(hr))
+        return;
+
+    std::wstring normalPath = GetAppPath() + L"..\\..\\texture\\BrickNM.dds";
+    ImageInfo normalInfo;
+    if (ReadDDSFile(normalPath.c_str(), normalInfo))
+    {
+        D3D11_TEXTURE2D_DESC normDesc = {};
+        normDesc.Width = normalInfo.width;
+        normDesc.Height = normalInfo.height;
+        normDesc.MipLevels = normalInfo.levelCount;
+        normDesc.ArraySize = 1;
+        normDesc.Format = normalInfo.format;
+        normDesc.SampleDesc.Count = 1;
+        normDesc.SampleDesc.Quality = 0;
+        normDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        normDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        std::vector<D3D11_SUBRESOURCE_DATA> normData(normalInfo.levelCount);
+
+        UINT normCurWidth = normalInfo.width;
+        UINT normCurHeight = normalInfo.height;
+        UINT normOffset = 0;
+
+        for (UINT mip = 0; mip < normalInfo.levelCount; ++mip)
+        {
+            UINT normBlockW = AlignDiv(normCurWidth, 4u);
+            UINT normBlockH = AlignDiv(normCurHeight, 4u);
+            UINT normPitch = normBlockW * GetBlockSize(normalInfo.format);
+
+            normData[mip].pSysMem = (BYTE*)normalInfo.data + normOffset;
+            normData[mip].SysMemPitch = normPitch;
+            normData[mip].SysMemSlicePitch = 0;
+
+            normOffset += normPitch * normBlockH;
+
+            normCurWidth = max(1u, normCurWidth / 2);
+            normCurHeight = max(1u, normCurHeight / 2);
+        }
+
+        ID3D11Texture2D* pNormalTex = nullptr;
+        hr = g_Device->CreateTexture2D(&normDesc, normData.data(), &pNormalTex);
+        if (SUCCEEDED(hr))
+        {
+            D3D11_SHADER_RESOURCE_VIEW_DESC normSRV = {};
+            normSRV.Format = normalInfo.format;
+            normSRV.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            normSRV.Texture2D.MostDetailedMip = 0;
+            normSRV.Texture2D.MipLevels = normalInfo.levelCount;
+
+            hr = g_Device->CreateShaderResourceView(pNormalTex, &normSRV, &g_NormalSRV);
+            pNormalTex->Release();
+        }
+
+        free(normalInfo.data);
+    }
 
     D3D11_SAMPLER_DESC sampDesc = {};
     sampDesc.Filter = D3D11_FILTER_ANISOTROPIC;
@@ -1055,125 +844,132 @@ void LoadTextures()
     sampDesc.MipLODBias = 0.0f;
     sampDesc.MaxAnisotropy = 16;
     sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sampDesc.BorderColor[0] = sampDesc.BorderColor[1] = sampDesc.BorderColor[2] = sampDesc.BorderColor[3] = 1.0f;
-    g_pD3DDevice->CreateSamplerState(&sampDesc, &g_pSampler);
+    g_Device->CreateSamplerState(&sampDesc, &g_Sampler);
 
     D3D11_RASTERIZER_DESC rsDesc = {};
     rsDesc.FillMode = D3D11_FILL_SOLID;
     rsDesc.CullMode = D3D11_CULL_BACK;
     rsDesc.FrontCounterClockwise = FALSE;
-    g_pD3DDevice->CreateRasterizerState(&rsDesc, &g_pRSCullBack);
+    g_Device->CreateRasterizerState(&rsDesc, &g_BackfaceCullRS);
 
-    std::wstring path = GetExePath() + L"..\\..\\texture\\skybox\\";
-    std::wstring faceNames[6] = {
-        path + L"posx.dds", path + L"negx.dds",
-        path + L"posy.dds", path + L"negy.dds",
-        path + L"posz.dds", path + L"negz.dds"
+    // Cubemap loading
+    std::wstring skyPath = GetAppPath() + L"..\\..\\texture\\skybox\\";
+    std::wstring faces[6] = {
+        skyPath + L"posx.dds", skyPath + L"negx.dds",
+        skyPath + L"posy.dds", skyPath + L"negy.dds",
+        skyPath + L"posz.dds", skyPath + L"negz.dds"
     };
 
-    TextureDesc faceDescs[6];
-    bool allOk = true;
+    ImageInfo faceInfo[6];
+    bool success = true;
     for (int i = 0; i < 6; ++i)
     {
-        if (!LoadDDS(faceNames[i].c_str(), faceDescs[i]))
+        if (!ReadDDSFile(faces[i].c_str(), faceInfo[i]))
         {
-            allOk = false;
+            success = false;
             break;
         }
     }
-    if (!allOk)
-    {
-        MessageBoxA(NULL, "Failed to load cubemap faces", "Error", MB_OK);
-        return;
-    }
 
-    for (int i = 1; i < 6; ++i)
+    if (success)
     {
-        if (faceDescs[i].fmt != faceDescs[0].fmt ||
-            faceDescs[i].width != faceDescs[0].width ||
-            faceDescs[i].height != faceDescs[0].height)
+        for (int i = 1; i < 6; ++i)
         {
-            MessageBoxA(NULL, "Cubemap faces must be identical", "Error", MB_OK);
-            return;
+            if (faceInfo[i].format != faceInfo[0].format ||
+                faceInfo[i].width != faceInfo[0].width ||
+                faceInfo[i].height != faceInfo[0].height)
+            {
+                success = false;
+                break;
+            }
         }
     }
 
+    if (!success)
+    {
+        MessageBoxA(NULL, "Failed to load cubemap", "Error", MB_OK);
+        return;
+    }
+
     D3D11_TEXTURE2D_DESC cubeDesc = {};
-    cubeDesc.Width = faceDescs[0].width;
-    cubeDesc.Height = faceDescs[0].height;
+    cubeDesc.Width = faceInfo[0].width;
+    cubeDesc.Height = faceInfo[0].height;
     cubeDesc.MipLevels = 1;
     cubeDesc.ArraySize = 6;
-    cubeDesc.Format = faceDescs[0].fmt;
+    cubeDesc.Format = faceInfo[0].format;
     cubeDesc.SampleDesc.Count = 1;
     cubeDesc.SampleDesc.Quality = 0;
     cubeDesc.Usage = D3D11_USAGE_IMMUTABLE;
     cubeDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     cubeDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
 
-    blockWidth = DivUp(cubeDesc.Width, 4u);
-    blockHeight = DivUp(cubeDesc.Height, 4u);
-    pitch = blockWidth * GetBytesPerBlock(cubeDesc.Format);
+    blockW = AlignDiv(cubeDesc.Width, 4u);
+    blockH = AlignDiv(cubeDesc.Height, 4u);
+    rowPitch = blockW * GetBlockSize(cubeDesc.Format);
 
-    D3D11_SUBRESOURCE_DATA initData[6];
+    D3D11_SUBRESOURCE_DATA cubeData[6] = {};
     for (int i = 0; i < 6; ++i)
     {
-        initData[i].pSysMem = faceDescs[i].pData;
-        initData[i].SysMemPitch = pitch;
-        initData[i].SysMemSlicePitch = 0;
+        cubeData[i].pSysMem = faceInfo[i].data;
+        cubeData[i].SysMemPitch = rowPitch;
+        cubeData[i].SysMemSlicePitch = 0;
     }
 
-    ID3D11Texture2D* pCubemapTex = nullptr;
-    hr = g_pD3DDevice->CreateTexture2D(&cubeDesc, initData, &pCubemapTex);
-    for (int i = 0; i < 6; ++i) free(faceDescs[i].pData);
-    if (FAILED(hr)) return;
+    ID3D11Texture2D* pCubeTex = nullptr;
+    hr = g_Device->CreateTexture2D(&cubeDesc, cubeData, &pCubeTex);
 
-    D3D11_SHADER_RESOURCE_VIEW_DESC cubeSRVDesc = {};
-    cubeSRVDesc.Format = cubeDesc.Format;
-    cubeSRVDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-    cubeSRVDesc.TextureCube.MipLevels = 1;
-    cubeSRVDesc.TextureCube.MostDetailedMip = 0;
-    hr = g_pD3DDevice->CreateShaderResourceView(pCubemapTex, &cubeSRVDesc, &g_pCubemapView);
-    pCubemapTex->Release();
+    for (int i = 0; i < 6; ++i)
+        free(faceInfo[i].data);
 
-    D3D11_RASTERIZER_DESC rsCullNoneDesc = {};
-    rsCullNoneDesc.FillMode = D3D11_FILL_SOLID;
-    rsCullNoneDesc.CullMode = D3D11_CULL_NONE;
-    rsCullNoneDesc.FrontCounterClockwise = FALSE;
-    g_pD3DDevice->CreateRasterizerState(&rsCullNoneDesc, &g_pRSCullNone);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_SHADER_RESOURCE_VIEW_DESC cubeSRV = {};
+        cubeSRV.Format = cubeDesc.Format;
+        cubeSRV.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+        cubeSRV.TextureCube.MostDetailedMip = 0;
+        cubeSRV.TextureCube.MipLevels = 1;
+
+        g_Device->CreateShaderResourceView(pCubeTex, &cubeSRV, &g_Cubemap);
+        pCubeTex->Release();
+    }
+
+    D3D11_RASTERIZER_DESC noCullDesc = {};
+    noCullDesc.FillMode = D3D11_FILL_SOLID;
+    noCullDesc.CullMode = D3D11_CULL_NONE;
+    noCullDesc.FrontCounterClockwise = FALSE;
+    g_Device->CreateRasterizerState(&noCullDesc, &g_NoCullRS);
 }
 
-void LoadTextureArray()
+void CreateTextureArray()
 {
-    std::vector<TextureDesc> texDescs(NUM_TEXTURES);
-    bool allOk = true;
-    for (UINT i = 0; i < NUM_TEXTURES; ++i)
+    std::vector<ImageInfo> textures(MATERIAL_COUNT);
+    bool success = true;
+    for (UINT i = 0; i < MATERIAL_COUNT; ++i)
     {
-        std::wstring fullPath = GetExePath() + L"..\\..\\texture\\" + TEXTURE_NAMES[i];
-        if (!LoadDDS(fullPath.c_str(), texDescs[i]))
+        std::wstring path = GetAppPath() + L"..\\..\\texture\\" + MATERIAL_PATHS[i];
+        if (!ReadDDSFile(path.c_str(), textures[i]))
         {
-            allOk = false;
+            success = false;
             break;
         }
     }
-    if (!allOk)
+    if (!success)
     {
-        MessageBoxA(NULL, "Failed to load one of the textures for array", "Error", MB_OK);
+        MessageBoxA(NULL, "Failed to load textures for array", "Error", MB_OK);
         return;
     }
 
-    DXGI_FORMAT fmt = texDescs[0].fmt;
-    UINT width = texDescs[0].width;
-    UINT height = texDescs[0].height;
-    UINT mipCount = texDescs[0].mipmapsCount;  // Lấy số mipmap từ texture đầu tiên
+    DXGI_FORMAT format = textures[0].format;
+    UINT width = textures[0].width;
+    UINT height = textures[0].height;
+    UINT mipLevels = textures[0].levelCount;
 
-    for (UINT i = 1; i < NUM_TEXTURES; ++i)
+    for (UINT i = 1; i < MATERIAL_COUNT; ++i)
     {
-        if (texDescs[i].fmt != fmt ||
-            texDescs[i].width != width ||
-            texDescs[i].height != height ||
-            texDescs[i].mipmapsCount != mipCount)  // Kiểm tra số mipmap bằng nhau
+        if (textures[i].format != format || textures[i].width != width ||
+            textures[i].height != height || textures[i].levelCount != mipLevels)
         {
-            MessageBoxA(NULL, "Textures must have same format, size and mip count", "Error", MB_OK);
+            MessageBoxA(NULL, "Texture mismatch", "Error", MB_OK);
             return;
         }
     }
@@ -1181,125 +977,116 @@ void LoadTextureArray()
     D3D11_TEXTURE2D_DESC texDesc = {};
     texDesc.Width = width;
     texDesc.Height = height;
-    texDesc.MipLevels = mipCount;  // Dùng toàn bộ mipmap từ file DDS
-    texDesc.ArraySize = NUM_TEXTURES;
-    texDesc.Format = fmt;
+    texDesc.MipLevels = mipLevels;
+    texDesc.ArraySize = MATERIAL_COUNT;
+    texDesc.Format = format;
     texDesc.SampleDesc.Count = 1;
     texDesc.Usage = D3D11_USAGE_IMMUTABLE;
     texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
-    UINT blockWidth = DivUp(width, 4u);
-    UINT blockHeight = DivUp(height, 4u);
-    UINT pitch = blockWidth * GetBytesPerBlock(fmt);
+    UINT blockW = AlignDiv(width, 4u);
+    UINT blockH = AlignDiv(height, 4u);
+    UINT pitch = blockW * GetBlockSize(format);
 
-    // Tính tổng kích thước dữ liệu cho tất cả mip levels
     std::vector<D3D11_SUBRESOURCE_DATA> initData;
-    for (UINT i = 0; i < NUM_TEXTURES; ++i)
+    for (UINT i = 0; i < MATERIAL_COUNT; ++i)
     {
         UINT w = width;
         UINT h = height;
         UINT offset = 0;
 
-        for (UINT mip = 0; mip < mipCount; ++mip)
+        for (UINT mip = 0; mip < mipLevels; ++mip)
         {
             D3D11_SUBRESOURCE_DATA data = {};
-            UINT bw = DivUp(w, 4u);
-            UINT bh = DivUp(h, 4u);
-            UINT mipPitch = bw * GetBytesPerBlock(fmt);
-            UINT mipSize = mipPitch * bh;
-
-            data.pSysMem = (BYTE*)texDescs[i].pData + offset;
+            UINT bw = AlignDiv(w, 4u);
+            UINT bh = AlignDiv(h, 4u);
+            UINT mipPitch = bw * GetBlockSize(format);
+            data.pSysMem = (BYTE*)textures[i].data + offset;
             data.SysMemPitch = mipPitch;
-            data.SysMemSlicePitch = 0;
             initData.push_back(data);
-
-            offset += mipSize;
+            offset += mipPitch * bh;
             w = max(1u, w / 2);
             h = max(1u, h / 2);
         }
     }
 
-    ID3D11Texture2D* pTexArray = nullptr;
-    HRESULT hr = g_pD3DDevice->CreateTexture2D(&texDesc, initData.data(), &pTexArray);
-    for (auto& td : texDescs) free(td.pData);
+    ID3D11Texture2D* pArrayTex = nullptr;
+    HRESULT hr = g_Device->CreateTexture2D(&texDesc, initData.data(), &pArrayTex);
+    for (auto& tex : textures) free(tex.data);
     if (FAILED(hr)) return;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = fmt;
+    srvDesc.Format = format;
     srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-    srvDesc.Texture2DArray.MipLevels = mipCount;  // Dùng tất cả mip levels
-    srvDesc.Texture2DArray.MostDetailedMip = 0;
-    srvDesc.Texture2DArray.ArraySize = NUM_TEXTURES;
-    srvDesc.Texture2DArray.FirstArraySlice = 0;
-    hr = g_pD3DDevice->CreateShaderResourceView(pTexArray, &srvDesc, &g_pTextureArrayView);
-    pTexArray->Release();
+    srvDesc.Texture2DArray.MipLevels = mipLevels;
+    srvDesc.Texture2DArray.ArraySize = MATERIAL_COUNT;
+    hr = g_Device->CreateShaderResourceView(pArrayTex, &srvDesc, &g_TextureArray);
+    pArrayTex->Release();
 }
 
-void CreateInstances()
+void InitInstances()
 {
-    g_InstanceCount = MAX_INSTANCES;
+    g_InstanceCount = MAX_OBJECTS;
     float radius = 3.0f;
+    srand((unsigned int)time(nullptr));
 
-    for (UINT i = 0; i < MAX_INSTANCES; ++i)
+    for (UINT i = 0; i < MAX_OBJECTS; ++i)
     {
         float phi = XM_PI * (3.0f - sqrtf(5.0f));
-        float y = 1.0f - (i / (float)(MAX_INSTANCES - 1)) * 2.0f;
-        float radiusAtY = sqrtf(1.0f - y * y);
+        float y = 1.0f - (i / (float)(MAX_OBJECTS - 1)) * 2.0f;
+        float r = sqrtf(1.0f - y * y);
         float theta = i * phi * 2.0f * XM_PI;
 
-        float x = cosf(theta) * radiusAtY;
-        float z = sinf(theta) * radiusAtY;
+        float x = cosf(theta) * r;
+        float z = sinf(theta) * r;
 
         XMFLOAT3 pos(x * radius, y * radius, z * radius);
 
-        XMMATRIX model = XMMatrixTranslation(pos.x, pos.y, pos.z);
-        XMMATRIX norm = XMMatrixTranspose(XMMatrixInverse(nullptr, model));
-        g_Instances[i].model = model;
-        g_Instances[i].norm = norm;
+        XMMATRIX world = XMMatrixTranslation(pos.x, pos.y, pos.z);
+        XMMATRIX invTrans = XMMatrixTranspose(XMMatrixInverse(nullptr, world));
+        g_Instances[i].world = world;
+        g_Instances[i].worldInvTrans = invTrans;
 
-        int texId = rand() % NUM_TEXTURES;
+        int texId = rand() % MATERIAL_COUNT;
         float shininess = 32.0f;
-        float rotSpeed = 0.5f + (rand() % 100) / 100.0f;
-        float normalMapPresence = (texId == 2) ? 1.0f : 0.0f;
-        g_Instances[i].shineSpeedTexIdNM = XMFLOAT4(shininess, rotSpeed, (float)texId, normalMapPresence);
-        g_Instances[i].angle = XMFLOAT4(pos.x, pos.y, pos.z, 0.0f);
+        float speed = 0.5f + (rand() % 100) / 100.0f;
+        float hasNormal = (texId == 2) ? 1.0f : 0.0f;
+        g_Instances[i].materialProps = XMFLOAT4(shininess, speed, (float)texId, hasNormal);
+        g_Instances[i].rotation = XMFLOAT4(pos.x, pos.y, pos.z, 0.0f);
     }
 }
 
-void UpdateInstanceTransforms(double time)
+void UpdateTransforms(double time)
 {
     for (UINT i = 0; i < g_InstanceCount; ++i)
     {
-        float angle = (float)time * g_Instances[i].shineSpeedTexIdNM.y;
+        float angle = (float)time * g_Instances[i].materialProps.y;
         XMMATRIX rot = XMMatrixRotationY(angle);
-        XMMATRIX trans = XMMatrixTranslation(g_Instances[i].angle.x, g_Instances[i].angle.y, g_Instances[i].angle.z);
-        g_Instances[i].model = rot * trans;
-        g_Instances[i].norm = XMMatrixTranspose(XMMatrixInverse(nullptr, g_Instances[i].model));
+        XMMATRIX trans = XMMatrixTranslation(g_Instances[i].rotation.x, g_Instances[i].rotation.y, g_Instances[i].rotation.z);
+        g_Instances[i].world = rot * trans;
+        g_Instances[i].worldInvTrans = XMMatrixTranspose(XMMatrixInverse(nullptr, g_Instances[i].world));
     }
 }
 
-void BuildFrustumPlanes(const XMMATRIX& vp, XMVECTOR planes[6])
+void BuildFrustum(const XMMATRIX& vp, XMVECTOR planes[6])
 {
-    XMVECTOR row1 = XMVectorSet(vp.r[0].m128_f32[0], vp.r[1].m128_f32[0], vp.r[2].m128_f32[0], vp.r[3].m128_f32[0]);
-    XMVECTOR row2 = XMVectorSet(vp.r[0].m128_f32[1], vp.r[1].m128_f32[1], vp.r[2].m128_f32[1], vp.r[3].m128_f32[1]);
-    XMVECTOR row3 = XMVectorSet(vp.r[0].m128_f32[2], vp.r[1].m128_f32[2], vp.r[2].m128_f32[2], vp.r[3].m128_f32[2]);
-    XMVECTOR row4 = XMVectorSet(vp.r[0].m128_f32[3], vp.r[1].m128_f32[3], vp.r[2].m128_f32[3], vp.r[3].m128_f32[3]);
+    XMVECTOR r0 = XMVectorSet(vp.r[0].m128_f32[0], vp.r[1].m128_f32[0], vp.r[2].m128_f32[0], vp.r[3].m128_f32[0]);
+    XMVECTOR r1 = XMVectorSet(vp.r[0].m128_f32[1], vp.r[1].m128_f32[1], vp.r[2].m128_f32[1], vp.r[3].m128_f32[1]);
+    XMVECTOR r2 = XMVectorSet(vp.r[0].m128_f32[2], vp.r[1].m128_f32[2], vp.r[2].m128_f32[2], vp.r[3].m128_f32[2]);
+    XMVECTOR r3 = XMVectorSet(vp.r[0].m128_f32[3], vp.r[1].m128_f32[3], vp.r[2].m128_f32[3], vp.r[3].m128_f32[3]);
 
-    planes[0] = row4 + row1;  // left
-    planes[1] = row4 - row1;  // right
-    planes[2] = row4 + row2;  // bottom
-    planes[3] = row4 - row2;  // top
-    planes[4] = row4 + row3;  // near
-    planes[5] = row4 - row3;  // far
+    planes[0] = r3 + r0;
+    planes[1] = r3 - r0;
+    planes[2] = r3 + r1;
+    planes[3] = r3 - r1;
+    planes[4] = r3 + r2;
+    planes[5] = r3 - r2;
 
     for (int i = 0; i < 6; ++i)
-    {
-        XMVECTOR norm = XMVector3Length(planes[i]);
-        planes[i] = planes[i] / norm;
-    }
+        planes[i] = planes[i] / XMVector3Length(planes[i]);
 }
 
-void TransformAABB(const XMMATRIX& transform, const XMVECTOR& localMin, const XMVECTOR& localMax, XMVECTOR& worldMin, XMVECTOR& worldMax)
+void TransformBounds(const XMMATRIX& transform, const XMVECTOR& localMin, const XMVECTOR& localMax, XMVECTOR& worldMin, XMVECTOR& worldMax)
 {
     XMVECTOR corners[8];
     corners[0] = XMVectorSet(XMVectorGetX(localMin), XMVectorGetY(localMin), XMVectorGetZ(localMin), 1.0f);
@@ -1315,13 +1102,13 @@ void TransformAABB(const XMMATRIX& transform, const XMVECTOR& localMin, const XM
     worldMax = XMVectorReplicate(-FLT_MAX);
     for (int i = 0; i < 8; ++i)
     {
-        XMVECTOR worldCorner = XMVector4Transform(corners[i], transform);
-        worldMin = XMVectorMin(worldMin, worldCorner);
-        worldMax = XMVectorMax(worldMax, worldCorner);
+        XMVECTOR wc = XMVector4Transform(corners[i], transform);
+        worldMin = XMVectorMin(worldMin, wc);
+        worldMax = XMVectorMax(worldMax, wc);
     }
 }
 
-bool IsAABBInsideFrustum(const XMVECTOR planes[6], const XMVECTOR& aabbMin, const XMVECTOR& aabbMax)
+bool TestFrustum(const XMVECTOR planes[6], const XMVECTOR& aabbMin, const XMVECTOR& aabbMax)
 {
     for (int i = 0; i < 6; ++i)
     {
@@ -1334,51 +1121,218 @@ bool IsAABBInsideFrustum(const XMVECTOR planes[6], const XMVECTOR& aabbMin, cons
     return true;
 }
 
-void UpdateCamera(double deltaTime)
+// Direct3D initialization
+bool InitD3D()
 {
-    float speed = 1.0f;
-    if (g_KeyLeft)  g_CamYaw -= speed * (float)deltaTime;
-    if (g_KeyRight) g_CamYaw += speed * (float)deltaTime;
-    if (g_KeyUp)    g_CamPitch += speed * (float)deltaTime;
-    if (g_KeyDown)  g_CamPitch -= speed * (float)deltaTime;
+    HRESULT hr;
 
-    const float maxPitch = 1.5f;
-    if (g_CamPitch > maxPitch) g_CamPitch = maxPitch;
-    if (g_CamPitch < -maxPitch) g_CamPitch = -maxPitch;
+    UINT flags = 0;
+#ifdef _DEBUG
+    flags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+
+    DXGI_SWAP_CHAIN_DESC swapDesc = {};
+    swapDesc.BufferCount = 2;
+    swapDesc.BufferDesc.Width = g_ScreenWidth;
+    swapDesc.BufferDesc.Height = g_ScreenHeight;
+    swapDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapDesc.BufferDesc.RefreshRate.Numerator = 60;
+    swapDesc.BufferDesc.RefreshRate.Denominator = 1;
+    swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapDesc.OutputWindow = g_MainWindow;
+    swapDesc.SampleDesc.Count = 1;
+    swapDesc.SampleDesc.Quality = 0;
+    swapDesc.Windowed = TRUE;
+    swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+
+    D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
+    D3D_FEATURE_LEVEL obtained;
+
+    hr = D3D11CreateDeviceAndSwapChain(
+        nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+        flags, levels, 1, D3D11_SDK_VERSION,
+        &swapDesc, &g_SwapChain, &g_Device, &obtained, &g_Context
+    );
+
+    if (FAILED(hr))
+        return false;
+
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    hr = g_SwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer);
+    if (FAILED(hr)) return false;
+
+    hr = g_Device->CreateRenderTargetView(pBackBuffer, nullptr, &g_MainRTV);
+    pBackBuffer->Release();
+    if (FAILED(hr)) return false;
+
+    D3D11_TEXTURE2D_DESC depthDesc = {};
+    depthDesc.Width = g_ScreenWidth;
+    depthDesc.Height = g_ScreenHeight;
+    depthDesc.MipLevels = 1;
+    depthDesc.ArraySize = 1;
+    depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
+    depthDesc.SampleDesc.Count = 1;
+    depthDesc.SampleDesc.Quality = 0;
+    depthDesc.Usage = D3D11_USAGE_DEFAULT;
+    depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+
+    ID3D11Texture2D* pDepth = nullptr;
+    hr = g_Device->CreateTexture2D(&depthDesc, nullptr, &pDepth);
+    if (FAILED(hr)) return false;
+
+    hr = g_Device->CreateDepthStencilView(pDepth, nullptr, &g_DSV);
+    pDepth->Release();
+    if (FAILED(hr)) return false;
+
+    return true;
 }
 
-void Render()
+void CreateOffscreenBuffer(UINT width, UINT height)
 {
-    if (!g_pD3DContext || !g_pBackBufferRTV || !g_pSwapChain)
+    RELEASE(g_OffscreenBuffer);
+    RELEASE(g_OffscreenRTV);
+    RELEASE(g_OffscreenSRV);
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.ArraySize = 1;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = 0;
+    desc.MiscFlags = 0;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.Height = height;
+    desc.Width = width;
+    desc.MipLevels = 1;
+
+    HRESULT hr = g_Device->CreateTexture2D(&desc, nullptr, &g_OffscreenBuffer);
+    if (SUCCEEDED(hr))
+        hr = g_Device->CreateRenderTargetView(g_OffscreenBuffer, nullptr, &g_OffscreenRTV);
+    if (SUCCEEDED(hr))
+        hr = g_Device->CreateShaderResourceView(g_OffscreenBuffer, nullptr, &g_OffscreenSRV);
+    assert(SUCCEEDED(hr));
+}
+
+// Window procedure
+LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_SIZE:
+        if (g_SwapChain && wParam != SIZE_MINIMIZED)
+        {
+            UINT newW = LOWORD(lParam);
+            UINT newH = HIWORD(lParam);
+            if (newW > 0 && newH > 0)
+            {
+                g_Context->OMSetRenderTargets(0, nullptr, nullptr);
+                RELEASE(g_MainRTV);
+                RELEASE(g_DSV);
+
+                g_SwapChain->ResizeBuffers(2, newW, newH, DXGI_FORMAT_UNKNOWN, 0);
+
+                ID3D11Texture2D* pBB = nullptr;
+                g_SwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBB);
+                if (pBB)
+                {
+                    g_Device->CreateRenderTargetView(pBB, nullptr, &g_MainRTV);
+                    pBB->Release();
+                }
+
+                D3D11_TEXTURE2D_DESC depthDesc = {};
+                depthDesc.Width = newW;
+                depthDesc.Height = newH;
+                depthDesc.MipLevels = 1;
+                depthDesc.ArraySize = 1;
+                depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
+                depthDesc.SampleDesc.Count = 1;
+                depthDesc.SampleDesc.Quality = 0;
+                depthDesc.Usage = D3D11_USAGE_DEFAULT;
+                depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+
+                ID3D11Texture2D* pDepthTex = nullptr;
+                g_Device->CreateTexture2D(&depthDesc, nullptr, &pDepthTex);
+                if (pDepthTex)
+                {
+                    g_Device->CreateDepthStencilView(pDepthTex, nullptr, &g_DSV);
+                    pDepthTex->Release();
+                }
+
+                g_ScreenWidth = newW;
+                g_ScreenHeight = newH;
+                CreateOffscreenBuffer(g_ScreenWidth, g_ScreenHeight);
+            }
+        }
+        return 0;
+
+    case WM_KEYDOWN:
+        if (wParam == VK_LEFT)  g_InputLeft = true;
+        if (wParam == VK_RIGHT) g_InputRight = true;
+        if (wParam == VK_UP)    g_InputUp = true;
+        if (wParam == VK_DOWN)  g_InputDown = true;
+        if (wParam == 'F')      g_EnableFilter = !g_EnableFilter;
+        return 0;
+
+    case WM_KEYUP:
+        if (wParam == VK_LEFT)  g_InputLeft = false;
+        if (wParam == VK_RIGHT) g_InputRight = false;
+        if (wParam == VK_UP)    g_InputUp = false;
+        if (wParam == VK_DOWN)  g_InputDown = false;
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+void UpdateCamera(double dt)
+{
+    float speed = 1.0f;
+    if (g_InputLeft)  g_CameraYaw -= speed * (float)dt;
+    if (g_InputRight) g_CameraYaw += speed * (float)dt;
+    if (g_InputUp)    g_CameraPitch += speed * (float)dt;
+    if (g_InputDown)  g_CameraPitch -= speed * (float)dt;
+
+    const float maxPitch = 1.5f;
+    g_CameraPitch = max(-maxPitch, min(maxPitch, g_CameraPitch));
+}
+
+void RenderFrame()
+{
+    if (!g_Context || !g_MainRTV || !g_SwapChain)
         return;
 
-    double currentTime = (double)GetTickCount64() / 1000.0;
-    double deltaTime = currentTime - g_LastFrameTime;
-    g_LastFrameTime = currentTime;
+    double now = (double)GetTickCount64() / 1000.0;
+    double delta = now - g_TimePrev;
+    g_TimePrev = now;
 
-    UpdateCamera(deltaTime);
+    UpdateCamera(delta);
 
-    g_pD3DContext->ClearState();
+    g_Context->ClearState();
 
-    ID3D11RenderTargetView* sceneTarget = g_useFilter ? g_pColorBufferRTV : g_pBackBufferRTV;
-    g_pD3DContext->OMSetRenderTargets(1, &sceneTarget, g_pDepthStencilView);
+    ID3D11RenderTargetView* renderTarget = g_EnableFilter ? g_OffscreenRTV : g_MainRTV;
+    g_Context->OMSetRenderTargets(1, &renderTarget, g_DSV);
 
     const float clearColor[4] = { 0.25f, 0.25f, 0.25f, 1.0f };
-    g_pD3DContext->ClearRenderTargetView(sceneTarget, clearColor);
-    g_pD3DContext->ClearDepthStencilView(g_pDepthStencilView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+    g_Context->ClearRenderTargetView(renderTarget, clearColor);
+    g_Context->ClearDepthStencilView(g_DSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
 
-    D3D11_VIEWPORT vp = { 0, 0, (float)g_WindowWidth, (float)g_WindowHeight, 0.0f, 1.0f };
-    g_pD3DContext->RSSetViewports(1, &vp);
-    g_pD3DContext->RSSetState(g_pRSCullBack);
+    D3D11_VIEWPORT vp = { 0, 0, (float)g_ScreenWidth, (float)g_ScreenHeight, 0.0f, 1.0f };
+    g_Context->RSSetViewports(1, &vp);
+    g_Context->RSSetState(g_BackfaceCullRS);
 
-    float camX = g_CamDistance * sin(g_CamYaw) * cos(g_CamPitch);
-    float camY = g_CamDistance * sin(g_CamPitch);
-    float camZ = g_CamDistance * cos(g_CamYaw) * cos(g_CamPitch);
+    // Camera matrices
+    float camX = g_CameraDist * sin(g_CameraYaw) * cos(g_CameraPitch);
+    float camY = g_CameraDist * sin(g_CameraPitch);
+    float camZ = g_CameraDist * cos(g_CameraYaw) * cos(g_CameraPitch);
     XMVECTOR eye = XMVectorSet(camX, camY, camZ, 0.0f);
-    XMVECTOR at = XMVectorZero();
+    XMVECTOR target = XMVectorZero();
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-    XMMATRIX view = XMMatrixLookAtLH(eye, at, up);
-    float aspect = (float)g_WindowWidth / (float)g_WindowHeight;
+    XMMATRIX view = XMMatrixLookAtLH(eye, target, up);
+    float aspect = (float)g_ScreenWidth / (float)g_ScreenHeight;
     XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PI / 3.0f, aspect, 0.1f, 100.0f);
     XMMATRIX viewProj = view * proj;
 
@@ -1389,236 +1343,193 @@ void Render()
         XMMATRIX vpSky = viewNoTrans * proj;
 
         D3D11_MAPPED_SUBRESOURCE mapped;
-        if (SUCCEEDED(g_pD3DContext->Map(g_pViewProjCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        if (SUCCEEDED(g_Context->Map(g_ViewProjCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
         {
-            ViewProjConstantBuffer* pData = (ViewProjConstantBuffer*)mapped.pData;
+            ViewProjectionData* pData = (ViewProjectionData*)mapped.pData;
             XMStoreFloat4x4((XMFLOAT4X4*)&pData->vp, XMMatrixTranspose(vpSky));
-            g_pD3DContext->Unmap(g_pViewProjCB, 0);
+            g_Context->Unmap(g_ViewProjCB, 0);
         }
 
         D3D11_DEPTH_STENCIL_DESC dsSky = {};
         dsSky.DepthEnable = TRUE;
         dsSky.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
         dsSky.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
-        dsSky.StencilEnable = FALSE;
         ID3D11DepthStencilState* pDSSky = nullptr;
-        g_pD3DDevice->CreateDepthStencilState(&dsSky, &pDSSky);
-        g_pD3DContext->OMSetDepthStencilState(pDSSky, 0);
-        SAFE_RELEASE(pDSSky);
+        g_Device->CreateDepthStencilState(&dsSky, &pDSSky);
+        g_Context->OMSetDepthStencilState(pDSSky, 0);
+        RELEASE(pDSSky);
 
         D3D11_RASTERIZER_DESC rsSky = {};
         rsSky.FillMode = D3D11_FILL_SOLID;
         rsSky.CullMode = D3D11_CULL_NONE;
         ID3D11RasterizerState* pRSSky = nullptr;
-        g_pD3DDevice->CreateRasterizerState(&rsSky, &pRSSky);
-        g_pD3DContext->RSSetState(pRSSky);
-        SAFE_RELEASE(pRSSky);
+        g_Device->CreateRasterizerState(&rsSky, &pRSSky);
+        g_Context->RSSetState(pRSSky);
+        RELEASE(pRSSky);
 
-        g_pD3DContext->VSSetShader(g_pSkyboxVS, nullptr, 0);
-        g_pD3DContext->PSSetShader(g_pSkyboxPS, nullptr, 0);
-        g_pD3DContext->IASetInputLayout(g_pSkyboxInputLayout);
-        UINT stride = sizeof(TexturedVertex);
+        g_Context->VSSetShader(g_SkyboxVS, nullptr, 0);
+        g_Context->PSSetShader(g_SkyboxPS, nullptr, 0);
+        g_Context->IASetInputLayout(g_SkyboxLayout);
+        UINT stride = sizeof(VertexSimple);
         UINT offset = 0;
-        ID3D11Buffer* vbSky[] = { g_pSkyboxVertexBuffer };
-        g_pD3DContext->IASetVertexBuffers(0, 1, vbSky, &stride, &offset);
-        g_pD3DContext->IASetIndexBuffer(g_pSkyboxIndexBuffer, DXGI_FORMAT_R16_UINT, 0);
-        g_pD3DContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11Buffer* cbsSky[] = { nullptr, g_pViewProjCB };
-        g_pD3DContext->VSSetConstantBuffers(0, 2, cbsSky);
-        ID3D11ShaderResourceView* skySRV[] = { g_pCubemapView };
-        g_pD3DContext->PSSetShaderResources(1, 1, skySRV);
-        ID3D11SamplerState* samplers[] = { g_pSampler };
-        g_pD3DContext->PSSetSamplers(1, 1, samplers);
+        ID3D11Buffer* vbs[] = { g_SkyboxVB };
+        g_Context->IASetVertexBuffers(0, 1, vbs, &stride, &offset);
+        g_Context->IASetIndexBuffer(g_SkyboxIB, DXGI_FORMAT_R16_UINT, 0);
+        g_Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11Buffer* cbs[] = { nullptr, g_ViewProjCB };
+        g_Context->VSSetConstantBuffers(0, 2, cbs);
+        ID3D11ShaderResourceView* skySRV[] = { g_Cubemap };
+        g_Context->PSSetShaderResources(1, 1, skySRV);
+        ID3D11SamplerState* samplers[] = { g_Sampler };
+        g_Context->PSSetSamplers(1, 1, samplers);
 
-        g_pD3DContext->DrawIndexed(36, 0, 0);
-        g_pD3DContext->RSSetState(g_pRSCullBack);
-        g_pD3DContext->OMSetDepthStencilState(nullptr, 0);
+        g_Context->DrawIndexed(36, 0, 0);
+        g_Context->RSSetState(g_BackfaceCullRS);
+        g_Context->OMSetDepthStencilState(nullptr, 0);
     }
 
+    // Update constant buffers
     D3D11_MAPPED_SUBRESOURCE mapped;
-    if (SUCCEEDED(g_pD3DContext->Map(g_pViewProjCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    if (SUCCEEDED(g_Context->Map(g_ViewProjCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
-        ViewProjConstantBuffer* pData = (ViewProjConstantBuffer*)mapped.pData;
+        ViewProjectionData* pData = (ViewProjectionData*)mapped.pData;
         XMStoreFloat4x4((XMFLOAT4X4*)&pData->vp, XMMatrixTranspose(viewProj));
-        g_pD3DContext->Unmap(g_pViewProjCB, 0);
+        g_Context->Unmap(g_ViewProjCB, 0);
     }
 
-    if (SUCCEEDED(g_pD3DContext->Map(g_pSceneCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    if (SUCCEEDED(g_Context->Map(g_FrameCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
-        SceneConstantBuffer* pScene = (SceneConstantBuffer*)mapped.pData;
-        XMStoreFloat4x4((XMFLOAT4X4*)&pScene->vp, XMMatrixTranspose(viewProj));
-        pScene->cameraPos = XMFLOAT4(camX, camY, camZ, 1.0f);
-        pScene->lightCount.x = 2;
-        pScene->lights[0].pos = XMFLOAT4(0.0f, 2.0f, 10.0f, 1.0f);
-        pScene->lights[0].color = XMFLOAT4(1.0f, 0.0f, 0.0f, 1.0f);
-        pScene->lights[1].pos = XMFLOAT4(0.0f, 2.0f, 2.5f, 1.0f);
-        pScene->lights[1].color = XMFLOAT4(0.6f, 0.8f, 1.0f, 1.0f);
-        pScene->ambientColor = XMFLOAT4(0.8f, 0.8f, 0.f, 1.0f);
-        g_pD3DContext->Unmap(g_pSceneCB, 0);
+        FrameData* pFrame = (FrameData*)mapped.pData;
+        XMStoreFloat4x4((XMFLOAT4X4*)&pFrame->vp, XMMatrixTranspose(viewProj));
+        pFrame->camPosition = XMFLOAT4(camX, camY, camZ, 1.0f);
+        pFrame->lightCount.x = 2;
+        pFrame->lights[0].position = XMFLOAT4(0.0f, 2.0f, 10.0f, 1.0f);
+        pFrame->lights[0].color = XMFLOAT4(1.0f, 0.0f, 0.0f, 1.0f);
+        pFrame->lights[1].position = XMFLOAT4(0.0f, 2.0f, 2.5f, 1.0f);
+        pFrame->lights[1].color = XMFLOAT4(0.6f, 0.8f, 1.0f, 1.0f);
+        pFrame->ambient = XMFLOAT4(0.8f, 0.8f, 0.f, 1.0f);
+        g_Context->Unmap(g_FrameCB, 0);
     }
 
-    UpdateInstanceTransforms(currentTime);
-    g_pD3DContext->UpdateSubresource(g_pGeomBufferInst, 0, nullptr, g_Instances, sizeof(GeomBuffer) * MAX_INSTANCES, 0);
+    UpdateTransforms(now);
+    g_Context->UpdateSubresource(g_InstanceCB, 0, nullptr, g_Instances, sizeof(PerInstance) * MAX_OBJECTS, 0);
 
+    // Frustum culling
     XMVECTOR frustumPlanes[6];
-    BuildFrustumPlanes(viewProj, frustumPlanes);
-    std::vector<UINT> visibleIndices;
+    BuildFrustum(viewProj, frustumPlanes);
+    std::vector<UINT> visible;
     XMVECTOR localMin = XMVectorSet(-0.5f, -0.5f, -0.5f, 1.0f);
     XMVECTOR localMax = XMVectorSet(0.5f, 0.5f, 0.5f, 1.0f);
     for (UINT i = 0; i < g_InstanceCount; ++i)
     {
-        XMVECTOR worldMin, worldMax;
-        TransformAABB(g_Instances[i].model, localMin, localMax, worldMin, worldMax);
-        if (IsAABBInsideFrustum(frustumPlanes, worldMin, worldMax))
-            visibleIndices.push_back(i);
+        XMVECTOR wMin, wMax;
+        TransformBounds(g_Instances[i].world, localMin, localMax, wMin, wMax);
+        if (TestFrustum(frustumPlanes, wMin, wMax))
+            visible.push_back(i);
     }
 
-    std::vector<XMUINT4> packedIds(MAX_INSTANCES);
-    for (size_t j = 0; j < visibleIndices.size(); ++j)
-        packedIds[j].x = visibleIndices[j];
-    g_pD3DContext->UpdateSubresource(g_pVisibleIdsBuffer, 0, nullptr, packedIds.data(), sizeof(XMUINT4) * MAX_INSTANCES, 0);
+    std::vector<XMUINT4> packed(MAX_OBJECTS);
+    for (size_t j = 0; j < visible.size(); ++j)
+        packed[j].x = visible[j];
+    g_Context->UpdateSubresource(g_VisibleListCB, 0, nullptr, packed.data(), sizeof(XMUINT4) * MAX_OBJECTS, 0);
 
-    UINT stride = sizeof(TexturedNormalTangentVertex);
+    // Draw instances
+    UINT stride = sizeof(VertexPacked);
     UINT offset = 0;
-    ID3D11Buffer* vbCube[] = { g_pVertexBuffer };
-    g_pD3DContext->IASetVertexBuffers(0, 1, vbCube, &stride, &offset);
-    g_pD3DContext->IASetIndexBuffer(g_pIndexBuffer, DXGI_FORMAT_R16_UINT, 0);
-    g_pD3DContext->IASetInputLayout(g_pInstancedInputLayout);
-    g_pD3DContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11Buffer* vbs[] = { g_VertexBuffer };
+    g_Context->IASetVertexBuffers(0, 1, vbs, &stride, &offset);
+    g_Context->IASetIndexBuffer(g_IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+    g_Context->IASetInputLayout(g_InstancedLayout);
+    g_Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    g_pD3DContext->VSSetShader(g_pInstancedVS, nullptr, 0);
-    g_pD3DContext->PSSetShader(g_pInstancedPS, nullptr, 0);
+    g_Context->VSSetShader(g_InstancedVS, nullptr, 0);
+    g_Context->PSSetShader(g_InstancedPS, nullptr, 0);
 
-    ID3D11Buffer* cbInstVS[] = { nullptr, g_pGeomBufferInst, g_pViewProjCB, g_pVisibleIdsBuffer };
-    g_pD3DContext->VSSetConstantBuffers(0, 4, cbInstVS);
+    ID3D11Buffer* vsCBs[] = { nullptr, g_InstanceCB, g_ViewProjCB, g_VisibleListCB };
+    g_Context->VSSetConstantBuffers(0, 4, vsCBs);
 
-    g_pD3DContext->PSSetConstantBuffers(1, 1, &g_pGeomBufferInst);
-    g_pD3DContext->PSSetConstantBuffers(3, 1, &g_pSceneCB);
-    g_pD3DContext->PSSetConstantBuffers(4, 1, &g_pVisibleIdsBuffer);
+    g_Context->PSSetConstantBuffers(1, 1, &g_InstanceCB);
+    g_Context->PSSetConstantBuffers(3, 1, &g_FrameCB);
+    g_Context->PSSetConstantBuffers(4, 1, &g_VisibleListCB);
 
-    ID3D11ShaderResourceView* texArraySRV[] = { g_pTextureArrayView, g_pNormalMapView };
-    g_pD3DContext->PSSetShaderResources(0, 2, texArraySRV);
-    ID3D11SamplerState* samp = g_pSampler;
-    g_pD3DContext->PSSetSamplers(0, 1, &samp);
+    ID3D11ShaderResourceView* texArraySRV[] = { g_TextureArray, g_NormalSRV };
+    g_Context->PSSetShaderResources(0, 2, texArraySRV);
+    ID3D11SamplerState* samp = g_Sampler;
+    g_Context->PSSetSamplers(0, 1, &samp);
 
-    if (visibleIndices.size() > 0)
-        g_pD3DContext->DrawIndexedInstanced(36, (UINT)visibleIndices.size(), 0, 0, 0);
+    if (visible.size() > 0)
+        g_Context->DrawIndexedInstanced(36, (UINT)visible.size(), 0, 0, 0);
 
-    // Apply filter if enabled
-    if (g_useFilter)
+    // Post-process filter
+    if (g_EnableFilter)
     {
-        g_pD3DContext->OMSetRenderTargets(1, &g_pBackBufferRTV, nullptr);
-        g_pD3DContext->ClearRenderTargetView(g_pBackBufferRTV, clearColor);
+        g_Context->OMSetRenderTargets(1, &g_MainRTV, nullptr);
+        g_Context->ClearRenderTargetView(g_MainRTV, clearColor);
 
-        g_pD3DContext->OMSetDepthStencilState(nullptr, 0);
-        g_pD3DContext->RSSetState(nullptr);
-        g_pD3DContext->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
-        g_pD3DContext->IASetInputLayout(nullptr);
-        g_pD3DContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_Context->OMSetDepthStencilState(nullptr, 0);
+        g_Context->RSSetState(nullptr);
+        g_Context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        g_Context->IASetInputLayout(nullptr);
+        g_Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        g_pD3DContext->VSSetShader(g_pFilterVS, nullptr, 0);
-        g_pD3DContext->PSSetShader(g_pFilterPS, nullptr, 0);
-        ID3D11ShaderResourceView* srv[] = { g_pColorBufferSRV };
-        g_pD3DContext->PSSetShaderResources(0, 1, srv);
-        ID3D11SamplerState* sampler[] = { g_pSampler };
-        g_pD3DContext->PSSetSamplers(0, 1, sampler);
-        g_pD3DContext->Draw(3, 0);
+        g_Context->VSSetShader(g_PostVS, nullptr, 0);
+        g_Context->PSSetShader(g_PostPS, nullptr, 0);
+        ID3D11ShaderResourceView* srv[] = { g_OffscreenSRV };
+        g_Context->PSSetShaderResources(0, 1, srv);
+        ID3D11SamplerState* sampler[] = { g_Sampler };
+        g_Context->PSSetSamplers(0, 1, sampler);
+        g_Context->Draw(3, 0);
     }
 
-    g_pSwapChain->Present(1, 0);
+    g_SwapChain->Present(1, 0);
 }
 
-void ResizeWindow(UINT newWidth, UINT newHeight)
+void Cleanup()
 {
-    if (!g_pSwapChain || !g_pD3DDevice || !g_pD3DContext)
-        return;
+    if (g_Context)
+        g_Context->ClearState();
 
-    g_pD3DContext->OMSetRenderTargets(0, nullptr, nullptr);
-    SAFE_RELEASE(g_pBackBufferRTV);
-    SAFE_RELEASE(g_pDepthStencilView);
+    RELEASE(g_TransformCB);
+    RELEASE(g_ViewProjCB);
+    RELEASE(g_FrameCB);
+    RELEASE(g_MainLayout);
+    RELEASE(g_MainVS);
+    RELEASE(g_MainPS);
+    RELEASE(g_SkyboxLayout);
+    RELEASE(g_SkyboxVS);
+    RELEASE(g_SkyboxPS);
+    RELEASE(g_IndexBuffer);
+    RELEASE(g_VertexBuffer);
+    RELEASE(g_SkyboxIB);
+    RELEASE(g_SkyboxVB);
+    RELEASE(g_MainRTV);
+    RELEASE(g_DSV);
+    RELEASE(g_SwapChain);
+    RELEASE(g_MainTexture);
+    RELEASE(g_Cubemap);
+    RELEASE(g_Sampler);
+    RELEASE(g_BackfaceCullRS);
+    RELEASE(g_NoCullRS);
+    RELEASE(g_NormalSRV);
 
-    HRESULT hr = g_pSwapChain->ResizeBuffers(2, newWidth, newHeight, DXGI_FORMAT_UNKNOWN, 0);
-    if (FAILED(hr)) return;
+    RELEASE(g_InstancedVS);
+    RELEASE(g_InstancedPS);
+    RELEASE(g_InstancedLayout);
+    RELEASE(g_InstanceCB);
+    RELEASE(g_VisibleListCB);
+    RELEASE(g_TextureArray);
 
-    ID3D11Texture2D* pBackBuffer = nullptr;
-    g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer);
-    if (pBackBuffer)
-    {
-        g_pD3DDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_pBackBufferRTV);
-        pBackBuffer->Release();
-    }
-
-    D3D11_TEXTURE2D_DESC depthDesc = {};
-    depthDesc.Width = newWidth;
-    depthDesc.Height = newHeight;
-    depthDesc.MipLevels = 1;
-    depthDesc.ArraySize = 1;
-    depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
-    depthDesc.SampleDesc.Count = 1;
-    depthDesc.SampleDesc.Quality = 0;
-    depthDesc.Usage = D3D11_USAGE_DEFAULT;
-    depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-
-    ID3D11Texture2D* pDepthStencil = nullptr;
-    g_pD3DDevice->CreateTexture2D(&depthDesc, nullptr, &pDepthStencil);
-    if (pDepthStencil)
-    {
-        g_pD3DDevice->CreateDepthStencilView(pDepthStencil, nullptr, &g_pDepthStencilView);
-        pDepthStencil->Release();
-    }
-
-    g_WindowWidth = newWidth;
-    g_WindowHeight = newHeight;
-
-    SetupColorBuffer(g_WindowWidth, g_WindowHeight);
-}
-
-void CleanupDirect3D()
-{
-    if (g_pD3DContext)
-        g_pD3DContext->ClearState();
-
-    SAFE_RELEASE(g_pModelCB);
-    SAFE_RELEASE(g_pViewProjCB);
-    SAFE_RELEASE(g_pSceneCB);
-    SAFE_RELEASE(g_pInputLayout);
-    SAFE_RELEASE(g_pVertexShader);
-    SAFE_RELEASE(g_pPixelShader);
-    SAFE_RELEASE(g_pSkyboxInputLayout);
-    SAFE_RELEASE(g_pSkyboxVS);
-    SAFE_RELEASE(g_pSkyboxPS);
-    SAFE_RELEASE(g_pIndexBuffer);
-    SAFE_RELEASE(g_pVertexBuffer);
-    SAFE_RELEASE(g_pSkyboxIndexBuffer);
-    SAFE_RELEASE(g_pSkyboxVertexBuffer);
-    SAFE_RELEASE(g_pBackBufferRTV);
-    SAFE_RELEASE(g_pDepthStencilView);
-    SAFE_RELEASE(g_pSwapChain);
-    SAFE_RELEASE(g_pTextureView);
-    SAFE_RELEASE(g_pCubemapView);
-    SAFE_RELEASE(g_pSampler);
-    SAFE_RELEASE(g_pRSCullBack);
-    SAFE_RELEASE(g_pRSCullNone);
-    SAFE_RELEASE(g_pNormalMapView);
-
-    SAFE_RELEASE(g_pInstancedVS);
-    SAFE_RELEASE(g_pInstancedPS);
-    SAFE_RELEASE(g_pInstancedInputLayout);
-    SAFE_RELEASE(g_pGeomBufferInst);
-    SAFE_RELEASE(g_pVisibleIdsBuffer);
-    SAFE_RELEASE(g_pTextureArrayView);
-
-    SAFE_RELEASE(g_pColorBuffer);
-    SAFE_RELEASE(g_pColorBufferRTV);
-    SAFE_RELEASE(g_pColorBufferSRV);
-    SAFE_RELEASE(g_pFilterVS);
-    SAFE_RELEASE(g_pFilterPS);
+    RELEASE(g_OffscreenBuffer);
+    RELEASE(g_OffscreenRTV);
+    RELEASE(g_OffscreenSRV);
+    RELEASE(g_PostVS);
+    RELEASE(g_PostPS);
 
 #ifdef _DEBUG
-    if (g_pD3DDevice)
+    if (g_Device)
     {
         ID3D11Debug* pDebug = nullptr;
-        if (SUCCEEDED(g_pD3DDevice->QueryInterface(__uuidof(ID3D11Debug), (void**)&pDebug)))
+        if (SUCCEEDED(g_Device->QueryInterface(__uuidof(ID3D11Debug), (void**)&pDebug)))
         {
             pDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL | D3D11_RLDO_IGNORE_INTERNAL);
             pDebug->Release();
@@ -1626,6 +1537,99 @@ void CleanupDirect3D()
     }
 #endif
 
-    SAFE_RELEASE(g_pD3DContext);
-    SAFE_RELEASE(g_pD3DDevice);
+    RELEASE(g_Context);
+    RELEASE(g_Device);
+}
+
+// Entry point
+int WINAPI wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow)
+{
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = L"D3D11App";
+
+    if (!RegisterClassExW(&wc))
+    {
+        MessageBoxW(nullptr, L"Failed to register window", L"Error", MB_OK);
+        return 0;
+    }
+
+    RECT rc = { 0, 0, (LONG)g_ScreenWidth, (LONG)g_ScreenHeight };
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    int winW = rc.right - rc.left;
+    int winH = rc.bottom - rc.top;
+
+    g_MainWindow = CreateWindowW(wc.lpszClassName, L"3D Rendering Demo",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+        winW, winH, nullptr, nullptr, hInst, nullptr);
+    if (!g_MainWindow)
+    {
+        MessageBoxW(nullptr, L"Failed to create window", L"Error", MB_OK);
+        return 0;
+    }
+
+    ShowWindow(g_MainWindow, nCmdShow);
+    UpdateWindow(g_MainWindow);
+
+    if (!InitD3D())
+    {
+        Cleanup();
+        DestroyWindow(g_MainWindow);
+        return -1;
+    }
+
+    BuildGeometry();
+    CreateOffscreenBuffer(g_ScreenWidth, g_ScreenHeight);
+    SetupShaders();
+    LoadMaterials();
+    CreateTextureArray();
+    InitInstances();
+
+    // Create constant buffers
+    D3D11_BUFFER_DESC desc = {};
+    desc.ByteWidth = sizeof(TransformData);
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    g_Device->CreateBuffer(&desc, nullptr, &g_TransformCB);
+
+    desc.ByteWidth = sizeof(ViewProjectionData);
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    g_Device->CreateBuffer(&desc, nullptr, &g_ViewProjCB);
+
+    desc.ByteWidth = sizeof(FrameData);
+    g_Device->CreateBuffer(&desc, nullptr, &g_FrameCB);
+
+    desc.ByteWidth = sizeof(PerInstance) * MAX_OBJECTS;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    desc.CPUAccessFlags = 0;
+    g_Device->CreateBuffer(&desc, nullptr, &g_InstanceCB);
+
+    desc.ByteWidth = sizeof(XMUINT4) * MAX_OBJECTS;
+    g_Device->CreateBuffer(&desc, nullptr, &g_VisibleListCB);
+
+    g_TimePrev = (double)GetTickCount64() / 1000.0;
+
+    MSG msg = {};
+    bool running = true;
+    while (running)
+    {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            if (msg.message == WM_QUIT)
+                running = false;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (running)
+            RenderFrame();
+    }
+
+    Cleanup();
+    return (int)msg.wParam;
 }
