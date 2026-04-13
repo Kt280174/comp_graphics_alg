@@ -28,8 +28,9 @@
 
 using namespace DirectX;
 
-// Constants
 const UINT MAX_OBJECTS = 10;
+const UINT CUBE_INDEX_COUNT = 36;
+const UINT CUBE_PRIMITIVE_COUNT = 12;
 const UINT MATERIAL_COUNT = 2;
 const std::wstring MATERIAL_PATHS[] = {
     L"Brick.dds",
@@ -42,7 +43,6 @@ struct ImageData;
 struct VertexLayout;
 struct InstanceData;
 
-// Global variables
 HWND g_MainWindow = nullptr;
 ID3D11Device* g_Device = nullptr;
 ID3D11DeviceContext* g_Context = nullptr;
@@ -52,35 +52,28 @@ ID3D11DepthStencilView* g_DSV = nullptr;
 ID3D11RasterizerState* g_NoCullRS = nullptr;
 ID3D11ShaderResourceView* g_NormalSRV = nullptr;
 
-// Buffers
 ID3D11Buffer* g_VertexBuffer = nullptr;
 ID3D11Buffer* g_IndexBuffer = nullptr;
 ID3D11Buffer* g_SkyboxVB = nullptr;
 ID3D11Buffer* g_SkyboxIB = nullptr;
 
-// Shaders - Main
 ID3D11VertexShader* g_MainVS = nullptr;
 ID3D11PixelShader* g_MainPS = nullptr;
 ID3D11InputLayout* g_MainLayout = nullptr;
 
-// Shaders - Skybox
 ID3D11VertexShader* g_SkyboxVS = nullptr;
 ID3D11PixelShader* g_SkyboxPS = nullptr;
 ID3D11InputLayout* g_SkyboxLayout = nullptr;
 
-// Shaders - Instanced
 ID3D11VertexShader* g_InstancedVS = nullptr;
 ID3D11PixelShader* g_InstancedPS = nullptr;
 ID3D11InputLayout* g_InstancedLayout = nullptr;
 
-// Shaders - Post process
 ID3D11VertexShader* g_PostVS = nullptr;
 ID3D11PixelShader* g_PostPS = nullptr;
 
-// Shaders - GPU culling
 ID3D11ComputeShader* g_CullCS = nullptr;
 
-// Constant buffers
 struct TransformData { XMMATRIX world; };
 struct ViewProjectionData { XMMATRIX vp; };
 struct FrameData {
@@ -127,32 +120,36 @@ ID3D11ShaderResourceView* g_GPUVisibleIndexSRV = nullptr;
 ID3D11UnorderedAccessView* g_GPUVisibleIndexUAV = nullptr;
 ID3D11Buffer* g_GPUIndirectArgsBuffer = nullptr;
 ID3D11UnorderedAccessView* g_GPUIndirectArgsUAV = nullptr;
-ID3D11Buffer* g_GPUIndirectArgsReadback = nullptr;
 ID3D11Buffer* g_GPUCullCB = nullptr;
 
-// Textures
+struct GPUVisibleCountQuery
+{
+    ID3D11Query* query = nullptr;
+};
+
+const UINT GPU_VISIBLE_COUNT_QUERY_COUNT = 10;
+GPUVisibleCountQuery g_GPUVisibleCountQueries[GPU_VISIBLE_COUNT_QUERY_COUNT];
+UINT64 g_GPUVisibleCountFrameIssued = 0;
+UINT64 g_GPUVisibleCountFrameCompleted = 0;
+
 ID3D11ShaderResourceView* g_MainTexture = nullptr;
 ID3D11ShaderResourceView* g_Cubemap = nullptr;
 ID3D11ShaderResourceView* g_TextureArray = nullptr;
 ID3D11SamplerState* g_Sampler = nullptr;
 
-// Render targets
 ID3D11Texture2D* g_OffscreenBuffer = nullptr;
 ID3D11RenderTargetView* g_OffscreenRTV = nullptr;
 ID3D11ShaderResourceView* g_OffscreenSRV = nullptr;
 
-// State objects
 ID3D11BlendState* g_BlendState = nullptr;
 ID3D11DepthStencilState* g_DepthReadOnly = nullptr;
 ID3D11RasterizerState* g_BackfaceCullRS = nullptr;
 
-// Instance data
 PerInstance g_Instances[MAX_OBJECTS];
 UINT g_InstanceCount = 0;
 XMVECTOR g_LocalMin = XMVectorSet(-0.5f, -0.5f, -0.5f, 0.0f);
 XMVECTOR g_LocalMax = XMVectorSet(0.5f, 0.5f, 0.5f, 0.0f);
 
-// Camera and window
 UINT g_ScreenWidth = 1280;
 UINT g_ScreenHeight = 720;
 float g_CameraYaw = 0.0f;
@@ -163,10 +160,8 @@ double g_TimePrev = 0.0;
 bool g_EnableFilter = true;
 UINT g_LastVisibleCount = 0;
 
-// Utility macros
 #define RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
 
-// Helper functions
 std::wstring GetAppPath()
 {
     wchar_t buffer[MAX_PATH];
@@ -178,7 +173,6 @@ std::wstring GetAppPath()
     return path;
 }
 
-// DDS structures
 struct DDS_PIXELFORMAT
 {
     DWORD size;
@@ -315,7 +309,6 @@ bool ReadDDSFile(const wchar_t* filename, ImageInfo& info)
     return true;
 }
 
-// Core geometry
 struct VertexPacked
 {
     XMFLOAT3 position;
@@ -413,7 +406,6 @@ void BuildGeometry()
     g_Device->CreateBuffer(&desc, &data, &g_SkyboxIB);
 }
 
-// Shader compilation
 void SetupShaders()
 {
     const char* mainVS = R"(
@@ -758,7 +750,6 @@ void SetupShaders()
     g_Device->CreateInputLayout(layoutDesc, 4, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_MainLayout);
     RELEASE(vsBlob);
 
-    // Instanced shaders
     D3DCompile(instancedVS, strlen(instancedVS), nullptr, nullptr, nullptr, "vs_main", "vs_5_0", flags, 0, &vsBlob, &errorBlob);
     if (errorBlob) { OutputDebugStringA((const char*)errorBlob->GetBufferPointer()); errorBlob->Release(); }
     g_Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_InstancedVS);
@@ -1218,7 +1209,6 @@ bool TestFrustum(const XMVECTOR planes[6], const XMVECTOR& aabbMin, const XMVECT
     return true;
 }
 
-// Direct3D initialization
 bool InitD3D()
 {
     HRESULT hr;
@@ -1320,7 +1310,6 @@ void CreateOffscreenBuffer(UINT width, UINT height)
     assert(SUCCEEDED(hr));
 }
 
-// Window procedure
 bool CreateGPUCullingResources()
 {
     HRESULT hr;
@@ -1392,12 +1381,18 @@ bool CreateGPUCullingResources()
     hr = g_Device->CreateUnorderedAccessView(g_GPUIndirectArgsBuffer, &uavDesc, &g_GPUIndirectArgsUAV);
     if (FAILED(hr)) return false;
 
-    desc = {};
-    desc.ByteWidth = sizeof(UINT) * 5;
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    hr = g_Device->CreateBuffer(&desc, nullptr, &g_GPUIndirectArgsReadback);
-    if (FAILED(hr)) return false;
+    D3D11_QUERY_DESC queryDesc = {};
+    queryDesc.Query = D3D11_QUERY_PIPELINE_STATISTICS;
+    queryDesc.MiscFlags = 0;
+
+    for (UINT i = 0; i < GPU_VISIBLE_COUNT_QUERY_COUNT; ++i)
+    {
+        hr = g_Device->CreateQuery(&queryDesc, &g_GPUVisibleCountQueries[i].query);
+        if (FAILED(hr)) return false;
+    }
+
+    g_GPUVisibleCountFrameIssued = 0;
+    g_GPUVisibleCountFrameCompleted = 0;
 
     return true;
 }
@@ -1487,6 +1482,69 @@ void UpdateCamera(double dt)
     g_CameraPitch = max(-maxPitch, min(maxPitch, g_CameraPitch));
 }
 
+void ResolveGPUVisibleCountQueries()
+{
+    while (g_GPUVisibleCountFrameCompleted < g_GPUVisibleCountFrameIssued)
+    {
+        GPUVisibleCountQuery& slot =
+            g_GPUVisibleCountQueries[g_GPUVisibleCountFrameCompleted % GPU_VISIBLE_COUNT_QUERY_COUNT];
+
+        if (!slot.query)
+        {
+            ++g_GPUVisibleCountFrameCompleted;
+            continue;
+        }
+
+        D3D11_QUERY_DATA_PIPELINE_STATISTICS stats = {};
+        HRESULT hr = g_Context->GetData(
+            slot.query,
+            &stats,
+            sizeof(stats),
+            D3D11_ASYNC_GETDATA_DONOTFLUSH
+        );
+
+        if (hr == S_OK)
+        {
+            const UINT64 primitiveCount = stats.IAPrimitives;
+            g_LastVisibleCount = static_cast<UINT>(primitiveCount / static_cast<UINT64>(CUBE_PRIMITIVE_COUNT));
+            ++g_GPUVisibleCountFrameCompleted;
+        }
+        else if (hr == S_FALSE)
+        {
+            break;
+        }
+        else
+        {
+            ++g_GPUVisibleCountFrameCompleted;
+            break;
+        }
+    }
+}
+
+ID3D11Query* BeginGPUVisibleCountQuery()
+{
+    if ((g_GPUVisibleCountFrameIssued - g_GPUVisibleCountFrameCompleted) >= GPU_VISIBLE_COUNT_QUERY_COUNT)
+        return nullptr;
+
+    GPUVisibleCountQuery& slot =
+        g_GPUVisibleCountQueries[g_GPUVisibleCountFrameIssued % GPU_VISIBLE_COUNT_QUERY_COUNT];
+
+    if (!slot.query)
+        return nullptr;
+
+    g_Context->Begin(slot.query);
+    return slot.query;
+}
+
+void EndGPUVisibleCountQuery(ID3D11Query* query)
+{
+    if (!query)
+        return;
+
+    g_Context->End(query);
+    ++g_GPUVisibleCountFrameIssued;
+}
+
 void RenderFrame()
 {
     if (!g_Context || !g_MainRTV || !g_SwapChain)
@@ -1499,6 +1557,8 @@ void RenderFrame()
     UpdateCamera(delta);
 
     g_Context->ClearState();
+
+    ResolveGPUVisibleCountQueries();
 
     ID3D11RenderTargetView* renderTarget = g_EnableFilter ? g_OffscreenRTV : g_MainRTV;
     g_Context->OMSetRenderTargets(1, &renderTarget, g_DSV);
@@ -1612,7 +1672,7 @@ void RenderFrame()
     cullData.instanceCount = g_InstanceCount;
     g_Context->UpdateSubresource(g_GPUCullCB, 0, nullptr, &cullData, 0, 0);
 
-    UINT indirectArgs[5] = { 36, 0, 0, 0, 0 };
+    UINT indirectArgs[5] = { CUBE_INDEX_COUNT, 0, 0, 0, 0 };
     g_Context->UpdateSubresource(g_GPUIndirectArgsBuffer, 0, nullptr, indirectArgs, 0, 0);
 
     g_Context->CSSetShader(g_CullCS, nullptr, 0);
@@ -1633,13 +1693,7 @@ void RenderFrame()
     g_Context->CSSetUnorderedAccessViews(0, 2, nullCS_UAV, nullptr);
     g_Context->CSSetShader(nullptr, nullptr, 0);
 
-    g_Context->CopyResource(g_GPUIndirectArgsReadback, g_GPUIndirectArgsBuffer);
-    if (SUCCEEDED(g_Context->Map(g_GPUIndirectArgsReadback, 0, D3D11_MAP_READ, 0, &mapped)))
-    {
-        UINT* argsData = (UINT*)mapped.pData;
-        g_LastVisibleCount = argsData[1];
-        g_Context->Unmap(g_GPUIndirectArgsReadback, 0);
-    }
+    ID3D11Query* visibleCountQuery = BeginGPUVisibleCountQuery();
 
     UINT stride = sizeof(VertexPacked);
     UINT offset = 0;
@@ -1663,8 +1717,8 @@ void RenderFrame()
     ID3D11SamplerState* samp = g_Sampler;
     g_Context->PSSetSamplers(0, 1, &samp);
 
-    if (g_LastVisibleCount > 0)
-        g_Context->DrawIndexedInstancedIndirect(g_GPUIndirectArgsBuffer, 0);
+    g_Context->DrawIndexedInstancedIndirect(g_GPUIndirectArgsBuffer, 0);
+    EndGPUVisibleCountQuery(visibleCountQuery);
 
     ID3D11ShaderResourceView* nullSRVs[3] = { nullptr, nullptr, nullptr };
     g_Context->VSSetShaderResources(0, 1, nullSRVs);
@@ -1743,8 +1797,9 @@ void Cleanup()
     RELEASE(g_GPUVisibleIndexUAV);
     RELEASE(g_GPUIndirectArgsBuffer);
     RELEASE(g_GPUIndirectArgsUAV);
-    RELEASE(g_GPUIndirectArgsReadback);
     RELEASE(g_GPUCullCB);
+    for (UINT i = 0; i < GPU_VISIBLE_COUNT_QUERY_COUNT; ++i)
+        RELEASE(g_GPUVisibleCountQueries[i].query);
 
     RELEASE(g_OffscreenBuffer);
     RELEASE(g_OffscreenRTV);
@@ -1768,7 +1823,6 @@ void Cleanup()
     RELEASE(g_Device);
 }
 
-// Entry point
 int WINAPI wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow)
 {
     WNDCLASSEXW wc = {};
@@ -1816,7 +1870,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ 
     CreateTextureArray();
     InitInstances();
 
-    // Create constant buffers
     D3D11_BUFFER_DESC desc = {};
     desc.ByteWidth = sizeof(TransformData);
     desc.Usage = D3D11_USAGE_DEFAULT;
